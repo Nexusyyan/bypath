@@ -1,0 +1,16 @@
+/target
+/runtime/
+/dist-release/
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+.impeccable/
+Cargo.lock
+*.exe
+*.dll
+*.sys
+*.pdb
+*.log
+.DS_Store
+Thumbs.db

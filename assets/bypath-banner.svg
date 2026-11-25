@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="140" viewBox="0 0 640 140" fill="none">
+  <rect width="640" height="140" rx="18" fill="#F9F9FA" />
+  <rect x="0.5" y="0.5" width="639" height="139" rx="17.5" stroke="#1A1A1D" stroke-opacity="0.08" />
+  <g transform="translate(36 32) scale(3.1666667)">
+    <rect x="1.5" y="1.5" width="21" height="21" rx="5.4" fill="#1A1A1D" />
+    <path
+      d="M7.7 17.6V6.6"
+      stroke="#6C6C77"
+      stroke-width="1.75"
+      stroke-linecap="round"
+    />
+    <path
+      d="M7.7 17.6V14.9C7.7 11.7 15.3 12.5 15.3 9.3V6.9"
+      stroke="#FFFFFF"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M12.5 9.4L15.3 6.6L18.1 9.4"
+      stroke="#FFFFFF"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </g>
+  <text
+    x="136"
+    y="69"
+    fill="#1A1A1D"
+    font-family="'Segoe UI Variable Display', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
+    font-size="40"
+    font-weight="650"
+    letter-spacing="-0.03em"
+  >Bypath</text>
+  <text
+    x="138"
+    y="101"
+    fill="#6E6E77"
+    font-family="'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
+    font-size="16"
+    font-weight="450"
+  >Per-application transparent proxy &amp; domain control in Rust</text>
+</svg>

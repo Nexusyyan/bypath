@@ -1,0 +1,53 @@
+# Bypath example configuration
+# Copy to config.toml and adjust your upstream proxy address.
+
+[general]
+log_level = "info"
+# Sniff TLS SNI / HTTP Host / QUIC Initial so upstream proxies resolve domains remotely
+# and domain-level blocking/routing rules can be enforced cleanly.
+enable_sniffing = true
+# Gracefully drop UDP/443 (QUIC) when the matched upstream proxy does not enable UDP,
+# forcing Chromium/Electron/Google clients to immediately fall back to TCP HTTP/2.
+block_quic_when_no_udp = true
+# Always bypass private/LAN CIDR ranges (RFC1918, link-local, ULA)
+bypass_lan = true
+# Path to directory containing WinDivert.dll and WinDivert64.sys
+windivert_dir = "runtime/windivert"
+
+[proxies.local_socks]
+type = "socks5"          # "socks5" or "http"
+address = "127.0.0.1:7890"
+# username = ""
+# password = ""
+udp = true               # Enable SOCKS5 UDP ASSOCIATE
+
+[proxies.local_http]
+type = "http"
+address = "127.0.0.1:7890"
+udp = false
+
+# Example: capture Antigravity and all of its spawned child processes
+# (language_server, MCP servers, helper runtimes, etc.)
+[[rules]]
+name = "Antigravity Full Process Tree"
+enabled = true
+process_names = [
+    "Antigravity.exe",
+    "language_server.exe",
+    "language_server_windows_x64.exe",
+]
+path_contains = ["Antigravity"]
+include_children = true
+action = "proxy"         # "proxy" | "direct" | "block"
+proxy = "local_socks"
+
+# Example: block unwanted tracking or ad domains across managed apps
+# Supports exact domains, *.suffix wildcards, .suffix, and * globs.
+[[rules]]
+name = "Blocked Domains"
+enabled = true
+domains = [
+    "*.doubleclick.net",
+    "telemetry.example.com",
+]
+action = "block"

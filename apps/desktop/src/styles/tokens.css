@@ -1,0 +1,60 @@
+:root {
+  /* Core neutral surface hierarchy (zero cool-blue cast) */
+  --surface-canvas: #FFFFFF;
+  --surface-sidebar: #F9F9FA;
+  --surface-subtle: #F7F7F9;
+  --surface-hover: #F2F2F5;
+  --surface-active: #EAEAEF;
+  --surface-chip: #F3F3F6;
+
+  /* Restrained ink hierarchy (pure #000000 prohibited) */
+  --ink-primary: #1A1A1D;
+  --ink-primary-hover: #2E2E33;
+  --ink-medium: #4A4A52;
+  --ink-secondary: #6E6E77;
+  --ink-on-dark: #FFFFFF;
+
+  /* Hairline dividers and control outlines */
+  --line-hairline: rgba(0, 0, 0, 0.06);
+  --line-control: rgba(0, 0, 0, 0.10);
+  --line-control-hover: rgba(0, 0, 0, 0.18);
+  --line-focus: rgba(26, 26, 29, 0.34);
+
+  /* Minimal semantic indicators (dots and compact inline text only) */
+  --status-ok: #27794B;
+  --status-ok-bg: rgba(39, 121, 75, 0.08);
+  --status-warn: #9A5B13;
+  --status-warn-bg: rgba(154, 91, 19, 0.08);
+  --status-err: #B43232;
+  --status-err-bg: rgba(180, 50, 50, 0.08);
+  --status-idle: #A1A1AA;
+
+  /* Soft geometry scale */
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* Spacing rhythm (4px base unit) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Typography */
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --duration-fast: 140ms;
+  --duration-base: 180ms;
+
+  /* Layout metrics */
+  --sidebar-width: 228px;
+  --topbar-height: 48px;
+}

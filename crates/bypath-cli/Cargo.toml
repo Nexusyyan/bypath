@@ -1,0 +1,20 @@
+[package]
+name = "bypath-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bypath"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bypath-core = { path = "../bypath-core" }
+bypath-daemon = { path = "../bypath-daemon" }
+bypath-ipc = { path = "../bypath-ipc" }
+bypath-windivert = { path = "../bypath-windivert" }
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
