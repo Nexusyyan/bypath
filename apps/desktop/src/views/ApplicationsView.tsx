@@ -1,18 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   BanIcon,
   CheckIcon,
   CloseIcon,
+  EditIcon,
   GlobeIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
   TerminalIcon,
+  TestIcon,
   TrashIcon,
 } from "../components/Icons";
+import { Select } from "../components/Select";
 import { api } from "../lib/api";
 import { useI18n, type MessageKey } from "../lib/i18n";
-import type { Config, PresetInfo, ProcessEntry, RuleAction, RuleConfig } from "../lib/types";
+import type {
+  Config,
+  PresetInfo,
+  ProcessEntry,
+  RuleAction,
+  RuleConfig,
+  RuleTestReport,
+} from "../lib/types";
 
 interface ApplicationsViewProps {
   config: Config;
@@ -63,6 +75,19 @@ function parseListInput(raw: string): string[] {
     .filter(Boolean);
 }
 
+function parseCommaList(raw: string): string[] {
+  return raw
+    .split(/[,\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parsePortList(raw: string): number[] {
+  return parseListInput(raw)
+    .map((s) => Number(s))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 65535);
+}
+
 export function ApplicationsView({
   config,
   presets,
@@ -71,7 +96,10 @@ export function ApplicationsView({
 }: ApplicationsViewProps) {
   const { t } = useI18n();
   const [showComposer, setShowComposer] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
+  const [showTester, setShowTester] = useState(false);
 
   const proxyNames = Object.keys(config.proxies);
   const defaultProxy = proxyNames[0] ?? "";
@@ -79,17 +107,32 @@ export function ApplicationsView({
   const [quickDomainInput, setQuickDomainInput] = useState("");
   const [quickDomainProc, setQuickDomainProc] = useState("");
 
+  // Rule composer fields
   const [ruleName, setRuleName] = useState("");
   const [processInput, setProcessInput] = useState("");
   const [pathInput, setPathInput] = useState("");
+  const [pathPrefixInput, setPathPrefixInput] = useState("");
   const [domainsInput, setDomainsInput] = useState("");
+  const [portsInput, setPortsInput] = useState("");
+  const [cidrsInput, setCidrsInput] = useState("");
+  const [protoChoice, setProtoChoice] = useState<"all" | "tcp" | "udp">("all");
   const [includeChildren, setIncludeChildren] = useState(true);
   const [action, setAction] = useState<RuleAction>("proxy");
   const [selectedProxy, setSelectedProxy] = useState(defaultProxy);
 
+  // Process picker state
   const [processes, setProcesses] = useState<ProcessEntry[]>([]);
   const [procFilter, setProcFilter] = useState("");
   const [loadingProcs, setLoadingProcs] = useState(false);
+
+  // Rule dry-run tester state
+  const [testProcess, setTestProcess] = useState("Antigravity.exe");
+  const [testPath, setTestPath] = useState("");
+  const [testHost, setTestHost] = useState("aicode.googleapis.com");
+  const [testPort, setTestPort] = useState("443");
+  const [testProto, setTestProto] = useState<"tcp" | "udp">("tcp");
+  const [testingRule, setTestingRule] = useState(false);
+  const [testReport, setTestReport] = useState<RuleTestReport | null>(null);
 
   useEffect(() => {
     if (!selectedProxy && defaultProxy) {
@@ -112,6 +155,65 @@ export function ApplicationsView({
       void loadProcesses();
     }
   }, [showPicker]);
+
+  const resetComposer = () => {
+    setEditingIndex(null);
+    setRuleName("");
+    setProcessInput("");
+    setPathInput("");
+    setPathPrefixInput("");
+    setDomainsInput("");
+    setPortsInput("");
+    setCidrsInput("");
+    setProtoChoice("all");
+    setIncludeChildren(true);
+    setAction("proxy");
+    setSelectedProxy(defaultProxy);
+    setShowAdvanced(false);
+  };
+
+  const openNewComposer = () => {
+    if (showComposer && editingIndex === null) {
+      setShowComposer(false);
+      return;
+    }
+    resetComposer();
+    setShowComposer(true);
+    setShowPicker(false);
+    setShowTester(false);
+  };
+
+  const openEditComposer = (index: number) => {
+    const r = config.rules[index];
+    setEditingIndex(index);
+    setRuleName(r.name);
+    setProcessInput(r.process_names.join(", "));
+    setPathInput(r.path_contains.join(", "));
+    setPathPrefixInput((r.path_prefixes ?? []).join(", "));
+    setDomainsInput((r.domains ?? []).join(", "));
+    setPortsInput((r.dst_ports ?? []).join(", "));
+    setCidrsInput((r.dst_cidrs ?? []).join(", "));
+    const protos = (r.protocols ?? []).map((p) => p.toLowerCase());
+    setProtoChoice(
+      protos.length === 1 && protos[0] === "tcp"
+        ? "tcp"
+        : protos.length === 1 && protos[0] === "udp"
+          ? "udp"
+          : "all"
+    );
+    setIncludeChildren(r.include_children);
+    setAction(r.action);
+    setSelectedProxy(r.proxy ?? defaultProxy);
+    const hasAdvanced =
+      (r.path_prefixes ?? []).length > 0 ||
+      (r.dst_ports ?? []).length > 0 ||
+      (r.dst_cidrs ?? []).length > 0 ||
+      protos.length > 0;
+    setShowAdvanced(hasAdvanced);
+    setShowComposer(true);
+    setShowPicker(false);
+    setShowTester(false);
+  };
 
   const blockedDomainEntries = useMemo(() => {
     const entries: Array<{
@@ -216,11 +318,7 @@ export function ApplicationsView({
     );
     if (patterns.length === 0) return;
 
-    const procNames = quickDomainProc
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
+    const procNames = parseCommaList(quickDomainProc);
     const nextRules = config.rules.map((r) => ({
       ...r,
       domains: [...(r.domains ?? [])],
@@ -309,6 +407,18 @@ export function ApplicationsView({
     await onSaveConfig({ ...config, rules: nextRules }, t("apps.toastRuleUpdated"));
   };
 
+  const moveRule = async (index: number, delta: -1 | 1) => {
+    const target = index + delta;
+    if (target < 0 || target >= config.rules.length) return;
+    const nextRules = [...config.rules];
+    const [item] = nextRules.splice(index, 1);
+    nextRules.splice(target, 0, item);
+    if (editingIndex === index) {
+      setEditingIndex(target);
+    }
+    await onSaveConfig({ ...config, rules: nextRules }, t("apps.toastOrderUpdated"));
+  };
+
   const changeRuleProxy = async (index: number, proxyName: string) => {
     const nextRules = config.rules.map((r, i) =>
       i === index ? { ...r, proxy: proxyName } : r
@@ -319,52 +429,69 @@ export function ApplicationsView({
   const deleteRule = async (index: number) => {
     const removed = config.rules[index];
     const nextRules = config.rules.filter((_, i) => i !== index);
+    if (editingIndex === index) {
+      setShowComposer(false);
+      setEditingIndex(null);
+    }
     await onSaveConfig(
       { ...config, rules: nextRules },
       t("apps.toastRuleRemoved", { name: removed.name })
     );
   };
 
-  const addCustomRule = async (e: React.FormEvent) => {
+  const saveRuleForm = async (e: React.FormEvent) => {
     e.preventDefault();
-    const names = processInput
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const paths = pathInput
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const names = parseCommaList(processInput);
+    const paths = parseCommaList(pathInput);
+    const prefixes = parseCommaList(pathPrefixInput);
     const domains = parseListInput(domainsInput).map((d) =>
       d.replace(/\.+$/, "").toLowerCase()
     );
-    if (!ruleName.trim() || (names.length === 0 && paths.length === 0 && domains.length === 0)) {
+    const dstPorts = parsePortList(portsInput);
+    const dstCidrs = parseListInput(cidrsInput);
+    const protocols = protoChoice === "all" ? [] : [protoChoice];
+
+    if (
+      !ruleName.trim() ||
+      (names.length === 0 &&
+        paths.length === 0 &&
+        prefixes.length === 0 &&
+        domains.length === 0 &&
+        dstPorts.length === 0 &&
+        dstCidrs.length === 0)
+    ) {
       return;
     }
 
-    const newRule: RuleConfig = {
+    const existingEnabled = editingIndex !== null ? config.rules[editingIndex].enabled : true;
+    const builtRule: RuleConfig = {
       name: ruleName.trim(),
-      enabled: true,
+      enabled: existingEnabled,
       process_names: names,
-      path_prefixes: [],
+      path_prefixes: prefixes,
       path_contains: paths,
       include_children: includeChildren,
-      dst_cidrs: [],
-      dst_ports: [],
-      protocols: [],
+      dst_cidrs: dstCidrs,
+      dst_ports: dstPorts,
+      protocols,
       domains,
       action,
       proxy: action === "proxy" ? selectedProxy || defaultProxy : null,
     };
 
-    await onSaveConfig(
-      { ...config, rules: [...config.rules, newRule] },
-      t("apps.toastRuleAdded", { name: newRule.name })
-    );
-    setRuleName("");
-    setProcessInput("");
-    setPathInput("");
-    setDomainsInput("");
+    const nextRules = [...config.rules];
+    if (editingIndex !== null && editingIndex < nextRules.length) {
+      nextRules[editingIndex] = builtRule;
+      await onSaveConfig({ ...config, rules: nextRules }, t("apps.toastRuleUpdated"));
+    } else {
+      nextRules.push(builtRule);
+      await onSaveConfig(
+        { ...config, rules: nextRules },
+        t("apps.toastRuleAdded", { name: builtRule.name })
+      );
+    }
+
+    resetComposer();
     setShowComposer(false);
   };
 
@@ -392,8 +519,32 @@ export function ApplicationsView({
     void loadProcesses();
   };
 
+  const runDryRunTest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTestingRule(true);
+    try {
+      const portNum = Number(testPort) || 443;
+      const report = await api.testRule({
+        process_name: testProcess.trim() || null,
+        exe_path: testPath.trim() || null,
+        host: testHost.trim() || null,
+        dst_ip: null,
+        dst_port: portNum,
+        protocol: testProto,
+      });
+      setTestReport(report);
+    } finally {
+      setTestingRule(false);
+    }
+  };
+
   const hasComposerCriteria =
-    Boolean(processInput.trim()) || Boolean(pathInput.trim()) || Boolean(domainsInput.trim());
+    Boolean(processInput.trim()) ||
+    Boolean(pathInput.trim()) ||
+    Boolean(pathPrefixInput.trim()) ||
+    Boolean(domainsInput.trim()) ||
+    Boolean(portsInput.trim()) ||
+    Boolean(cidrsInput.trim());
 
   return (
     <div className="view-container">
@@ -531,10 +682,23 @@ export function ApplicationsView({
           <div className="toolbar-group">
             <button
               type="button"
+              className={`btn btn-sm ${showTester ? "btn-secondary" : "btn-outline"}`}
+              onClick={() => {
+                setShowTester((v) => !v);
+                setShowComposer(false);
+                setShowPicker(false);
+              }}
+            >
+              <TestIcon size={13} />
+              <span>{t("apps.testMatch")}</span>
+            </button>
+            <button
+              type="button"
               className={`btn btn-sm ${showPicker ? "btn-secondary" : "btn-outline"}`}
               onClick={() => {
                 setShowPicker((v) => !v);
                 setShowComposer(false);
+                setShowTester(false);
               }}
             >
               <TerminalIcon size={13} />
@@ -542,11 +706,8 @@ export function ApplicationsView({
             </button>
             <button
               type="button"
-              className={`btn btn-sm ${showComposer ? "btn-secondary" : "btn-primary"}`}
-              onClick={() => {
-                setShowComposer((v) => !v);
-                setShowPicker(false);
-              }}
+              className={`btn btn-sm ${showComposer && editingIndex === null ? "btn-secondary" : "btn-primary"}`}
+              onClick={openNewComposer}
             >
               <PlusIcon size={13} />
               <span>{t("apps.addRule")}</span>
@@ -554,12 +715,138 @@ export function ApplicationsView({
           </div>
         </div>
 
+        {showTester && (
+          <form
+            className="composer-panel"
+            onSubmit={(e) => void runDryRunTest(e)}
+            style={{ marginBottom: 14 }}
+          >
+            <div className="form-grid">
+              <div className="form-field">
+                <label className="form-label" htmlFor="test-proc">
+                  {t("apps.testProcess")}
+                </label>
+                <input
+                  id="test-proc"
+                  className="input mono"
+                  value={testProcess}
+                  onChange={(e) => setTestProcess(e.target.value)}
+                  placeholder="Antigravity.exe"
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="test-host">
+                  {t("apps.testHost")}
+                </label>
+                <input
+                  id="test-host"
+                  className="input mono"
+                  value={testHost}
+                  onChange={(e) => setTestHost(e.target.value)}
+                  placeholder="aicode.googleapis.com"
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="test-path">
+                  {t("apps.testPath")}
+                </label>
+                <input
+                  id="test-path"
+                  className="input mono"
+                  value={testPath}
+                  onChange={(e) => setTestPath(e.target.value)}
+                  placeholder="C:\Program Files\App\app.exe"
+                />
+              </div>
+              <div className="form-field">
+                <label className="form-label" htmlFor="test-port">
+                  {t("apps.testPort")} / {t("apps.protocols")}
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    id="test-port"
+                    className="input mono"
+                    style={{ width: 110 }}
+                    value={testPort}
+                    onChange={(e) => setTestPort(e.target.value)}
+                  />
+                  <Select<"tcp" | "udp">
+                    value={testProto}
+                    ariaLabel={t("apps.protocols")}
+                    style={{ minWidth: 96 }}
+                    onChange={(val) => setTestProto(val)}
+                    options={[
+                      { value: "tcp", label: "TCP" },
+                      { value: "udp", label: "UDP" },
+                    ]}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {testReport && (
+              <div className="test-result-box">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span
+                    className={`dot ${
+                      testReport.final_action === "proxy"
+                        ? "dot-ok"
+                        : testReport.final_action === "block"
+                          ? "dot-err"
+                          : "dot-idle"
+                    }`}
+                  />
+                  <strong>{t("apps.testFinal")}:</strong>
+                  <span className="tag tag-mono">{testReport.final_action.toUpperCase()}</span>
+                  {testReport.final_proxy && (
+                    <span className="tag tag-mono">{testReport.final_proxy}</span>
+                  )}
+                  {testReport.matched_rule && (
+                    <span className="cell-secondary">{testReport.matched_rule}</span>
+                  )}
+                </div>
+                <div className="cell-secondary mono">
+                  {t("apps.testPhase1")}: {testReport.phase1_decision} ({testReport.phase1_reason})
+                </div>
+                {testReport.phase2_decision && (
+                  <div className="cell-secondary mono">
+                    {t("apps.testPhase2")}: {testReport.phase2_decision} (
+                    {testReport.phase2_rule ?? "-"})
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="form-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setShowTester(false)}
+              >
+                {t("apps.done")}
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={testingRule}>
+                {testingRule ? t("apps.testRunning") : t("apps.testRun")}
+              </button>
+            </div>
+          </form>
+        )}
+
         {showComposer && (
           <form
             className="composer-panel"
-            onSubmit={(e) => void addCustomRule(e)}
+            onSubmit={(e) => void saveRuleForm(e)}
             style={{ marginBottom: 14 }}
           >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span className="section-title" style={{ fontSize: 14 }}>
+                {editingIndex !== null ? t("apps.editRuleTitle") : t("apps.newRuleTitle")}
+              </span>
+              {editingIndex !== null && (
+                <span className="priority-badge">#{editingIndex + 1}</span>
+              )}
+            </div>
+
             <div className="form-grid">
               <div className="form-field">
                 <label className="form-label" htmlFor="rule-name">
@@ -579,16 +866,17 @@ export function ApplicationsView({
                 <label className="form-label" htmlFor="rule-action">
                   {t("apps.action")}
                 </label>
-                <select
+                <Select<RuleAction>
                   id="rule-action"
-                  className="select"
                   value={action}
-                  onChange={(e) => setAction(e.target.value as RuleAction)}
-                >
-                  <option value="proxy">{t("apps.actionProxy")}</option>
-                  <option value="direct">{t("apps.actionDirect")}</option>
-                  <option value="block">{t("apps.actionBlock")}</option>
-                </select>
+                  ariaLabel={t("apps.action")}
+                  onChange={(val) => setAction(val)}
+                  options={[
+                    { value: "proxy", label: t("apps.actionProxy") },
+                    { value: "direct", label: t("apps.actionDirect") },
+                    { value: "block", label: t("apps.actionBlock") },
+                  ]}
+                />
               </div>
 
               <div className="form-field">
@@ -638,18 +926,16 @@ export function ApplicationsView({
                   <label className="form-label" htmlFor="rule-proxy">
                     {t("apps.upstreamProxy")}
                   </label>
-                  <select
+                  <Select
                     id="rule-proxy"
-                    className="select"
                     value={selectedProxy}
-                    onChange={(e) => setSelectedProxy(e.target.value)}
-                  >
-                    {proxyNames.map((name) => (
-                      <option key={name} value={name}>
-                        {name} ({config.proxies[name].address})
-                      </option>
-                    ))}
-                  </select>
+                    ariaLabel={t("apps.upstreamProxy")}
+                    onChange={(val) => setSelectedProxy(val)}
+                    options={proxyNames.map((name) => ({
+                      value: name,
+                      label: `${name} (${config.proxies[name].address})`,
+                    }))}
+                  />
                 </div>
               )}
 
@@ -668,11 +954,81 @@ export function ApplicationsView({
               </div>
             </div>
 
+            <div>
+              <button
+                type="button"
+                className="advanced-toggle"
+                onClick={() => setShowAdvanced((v) => !v)}
+              >
+                <span>{showAdvanced ? t("apps.advancedHide") : t("apps.advancedShow")}</span>
+              </button>
+
+              {showAdvanced && (
+                <div className="form-grid" style={{ marginTop: 10 }}>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="rule-ports">
+                      {t("apps.dstPorts")}
+                    </label>
+                    <input
+                      id="rule-ports"
+                      className="input mono"
+                      value={portsInput}
+                      onChange={(e) => setPortsInput(e.target.value)}
+                      placeholder={t("apps.dstPortsPlaceholder")}
+                    />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="rule-proto">
+                      {t("apps.protocols")}
+                    </label>
+                    <Select<"all" | "tcp" | "udp">
+                      id="rule-proto"
+                      value={protoChoice}
+                      ariaLabel={t("apps.protocols")}
+                      onChange={(val) => setProtoChoice(val)}
+                      options={[
+                        { value: "all", label: t("apps.protocolsAll") },
+                        { value: "tcp", label: t("apps.protocolsTcp") },
+                        { value: "udp", label: t("apps.protocolsUdp") },
+                      ]}
+                    />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="rule-cidrs">
+                      {t("apps.dstCidrs")}
+                    </label>
+                    <input
+                      id="rule-cidrs"
+                      className="input mono"
+                      value={cidrsInput}
+                      onChange={(e) => setCidrsInput(e.target.value)}
+                      placeholder={t("apps.dstCidrsPlaceholder")}
+                    />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="rule-prefixes">
+                      {t("apps.pathPrefixes")}
+                    </label>
+                    <input
+                      id="rule-prefixes"
+                      className="input mono"
+                      value={pathPrefixInput}
+                      onChange={(e) => setPathPrefixInput(e.target.value)}
+                      placeholder={t("apps.pathPrefixesPlaceholder")}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="form-actions">
               <button
                 type="button"
                 className="btn btn-ghost"
-                onClick={() => setShowComposer(false)}
+                onClick={() => {
+                  resetComposer();
+                  setShowComposer(false);
+                }}
               >
                 {t("apps.cancel")}
               </button>
@@ -738,7 +1094,7 @@ export function ApplicationsView({
                       <td>
                         <div className="cell-primary">{proc.name}</div>
                         <div className="cell-secondary mono">
-                          PID {proc.pid} · PPID {proc.parent_pid}
+                          PID {proc.pid} / PPID {proc.parent_pid}
                         </div>
                       </td>
                       <td className="mono cell-secondary" title={proc.exe_path ?? undefined}>
@@ -781,10 +1137,14 @@ export function ApplicationsView({
           ) : (
             config.rules.map((rule, idx) => {
               const domains = rule.domains ?? [];
+              const ports = rule.dst_ports ?? [];
+              const cidrs = rule.dst_cidrs ?? [];
+              const protos = rule.protocols ?? [];
               return (
                 <div key={`${rule.name}-${idx}`} className="row-item">
                   <div className="row-item-main">
                     <div className="row-item-title">
+                      <span className="priority-badge">#{idx + 1}</span>
                       {rule.action === "block" && (
                         <span
                           className={`dot ${rule.enabled ? "dot-err" : "dot-idle"}`}
@@ -796,7 +1156,9 @@ export function ApplicationsView({
                         <span className="tag">{t("apps.tagDomain")}</span>
                       )}
                       {rule.include_children &&
-                        (rule.process_names.length > 0 || rule.path_contains.length > 0) && (
+                        (rule.process_names.length > 0 ||
+                          rule.path_contains.length > 0 ||
+                          (rule.path_prefixes ?? []).length > 0) && (
                           <span className="tag">{t("apps.tagProcessTree")}</span>
                         )}
                       <span className="tag tag-mono">{rule.action.toUpperCase()}</span>
@@ -810,28 +1172,66 @@ export function ApplicationsView({
                         rule.path_contains.length > 0
                           ? `path: ${rule.path_contains.join(", ")}`
                           : null,
+                        (rule.path_prefixes ?? []).length > 0
+                          ? `prefix: ${rule.path_prefixes.join(", ")}`
+                          : null,
+                        ports.length > 0 ? `port: ${ports.join(", ")}` : null,
+                        cidrs.length > 0 ? `cidr: ${cidrs.join(", ")}` : null,
+                        protos.length > 0 ? `proto: ${protos.join("/")}` : null,
                       ]
                         .filter(Boolean)
-                        .join("  ·  ") || t("apps.allMatchingTraffic")}
+                        .join("  |  ") || t("apps.allMatchingTraffic")}
                     </div>
                   </div>
 
                   <div className="row-item-actions">
-                    {rule.action === "proxy" && proxyNames.length > 0 && (
-                      <select
-                        className="select"
-                        style={{ height: 28, fontSize: 12.5 }}
-                        value={rule.proxy ?? defaultProxy}
-                        aria-label={rule.name}
-                        onChange={(e) => void changeRuleProxy(idx, e.target.value)}
+                    <div className="order-btn-group">
+                      <button
+                        type="button"
+                        className="order-btn"
+                        disabled={saving || idx === 0}
+                        title={t("apps.moveUp")}
+                        aria-label={t("apps.moveUp")}
+                        onClick={() => void moveRule(idx, -1)}
                       >
-                        {proxyNames.map((name) => (
-                          <option key={name} value={name}>
-                            {name}
-                          </option>
-                        ))}
-                      </select>
+                        <ArrowUpIcon size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        className="order-btn"
+                        disabled={saving || idx === config.rules.length - 1}
+                        title={t("apps.moveDown")}
+                        aria-label={t("apps.moveDown")}
+                        onClick={() => void moveRule(idx, 1)}
+                      >
+                        <ArrowDownIcon size={13} />
+                      </button>
+                    </div>
+
+                    {rule.action === "proxy" && proxyNames.length > 0 && (
+                      <Select
+                        size="sm"
+                        align="right"
+                        value={rule.proxy ?? defaultProxy}
+                        ariaLabel={rule.name}
+                        onChange={(val) => void changeRuleProxy(idx, val)}
+                        options={proxyNames.map((name) => ({
+                          value: name,
+                          label: name,
+                        }))}
+                      />
                     )}
+
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title={t("apps.editRule")}
+                      aria-label={t("apps.editRule")}
+                      disabled={saving}
+                      onClick={() => openEditComposer(idx)}
+                    >
+                      <EditIcon size={13} />
+                    </button>
 
                     <button
                       type="button"

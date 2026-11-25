@@ -30,6 +30,13 @@ pub async fn connect_tcp(proxy: &ProxyConfig, target: &TargetAddr) -> Result<Tcp
     Ok(stream)
 }
 
+/// Validates RFC 1928 SOCKS5 handshake and optional username/password authentication
+/// on an already-connected TCP stream.
+pub async fn probe_handshake_stream(stream: &mut TcpStream, proxy: &ProxyConfig) -> Result<()> {
+    let _ = stream.set_nodelay(true);
+    negotiate_auth(stream, proxy).await
+}
+
 /// Active SOCKS5 UDP ASSOCIATE session (control TCP socket must stay alive).
 pub struct Socks5UdpAssociation {
     pub _control_stream: TcpStream,

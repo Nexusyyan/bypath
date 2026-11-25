@@ -1,22 +1,29 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import {
+  ArrowUpRightIcon,
   BrandMark,
   CloseIcon,
   LanguageIcon,
   MaximizeIcon,
   MinimizeIcon,
+  MonitorIcon,
+  MoonIcon,
   RefreshIcon,
   RestoreIcon,
+  SunIcon,
 } from "./Icons";
 import { isTauriRuntime } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { useTheme } from "../lib/theme";
 import type { DaemonStatus } from "../lib/types";
 
 interface TitlebarProps {
   sectionLabel: string;
   status: DaemonStatus | null;
   firstProxyAddress: string | null;
+  updateAvailableTag: string | null;
+  onOpenUpdates: () => void;
   onRefresh: () => void;
 }
 
@@ -24,9 +31,12 @@ export function Titlebar({
   sectionLabel,
   status,
   firstProxyAddress,
+  updateAvailableTag,
+  onOpenUpdates,
   onRefresh,
 }: TitlebarProps) {
   const { locale, toggleLocale, t } = useI18n();
+  const { mode, cycleMode } = useTheme();
   const [maximized, setMaximized] = useState(false);
   const inTauri = isTauriRuntime();
 
@@ -58,6 +68,10 @@ export function Titlebar({
     void getCurrentWindow().close();
   };
 
+  const themeTitle = `${t("topbar.switchTheme")} (${
+    mode === "dark" ? t("theme.dark") : mode === "light" ? t("theme.light") : t("theme.system")
+  })`;
+
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-left" data-tauri-drag-region>
@@ -85,9 +99,38 @@ export function Titlebar({
           />
           <span>
             {status?.engine_running ? t("engine.active") : t("engine.standby")}
-            {firstProxyAddress ? ` · ${firstProxyAddress}` : ""}
+            {firstProxyAddress ? ` / ${firstProxyAddress}` : ""}
           </span>
         </span>
+
+        {updateAvailableTag && (
+          <button
+            type="button"
+            className="titlebar-pill-btn titlebar-update-pill"
+            title={t("topbar.updateAvailable", { tag: updateAvailableTag })}
+            aria-label={t("topbar.updateAvailable", { tag: updateAvailableTag })}
+            onClick={onOpenUpdates}
+          >
+            <ArrowUpRightIcon size={12} />
+            <span>{updateAvailableTag}</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          className="icon-btn"
+          title={themeTitle}
+          aria-label={themeTitle}
+          onClick={cycleMode}
+        >
+          {mode === "dark" ? (
+            <MoonIcon size={14} />
+          ) : mode === "light" ? (
+            <SunIcon size={14} />
+          ) : (
+            <MonitorIcon size={14} />
+          )}
+        </button>
 
         <button
           type="button"

@@ -1205,3 +1205,174 @@ fn config_example_toml_parses_and_validates() {
     assert!(cfg.proxies.contains_key("local_http"));
     assert!(!cfg.rules.is_empty());
 }
+
+fn build_large_post_quantum_client_hello(sni: &str, padding_bytes: usize) -> Vec<u8> {
+    let hb = sni.as_bytes();
+    let mut exts = Vec::new();
+
+    // Place a large ML-KEM / padding extension BEFORE server_name so SNI falls into TCP segment 2.
+    exts.extend_from_slice(&0x0015u16.to_be_bytes()); // TLS padding extension
+    exts.extend_from_slice(&(padding_bytes as u16).to_be_bytes());
+    exts.extend(std::iter::repeat_n(0x00u8, padding_bytes));
+
+    let mut sni_ext = Vec::new();
+    sni_ext.extend_from_slice(&((3 + hb.len()) as u16).to_be_bytes());
+    sni_ext.push(0x00);
+    sni_ext.extend_from_slice(&(hb.len() as u16).to_be_bytes());
+    sni_ext.extend_from_slice(hb);
+
+    exts.extend_from_slice(&0x0000u16.to_be_bytes());
+    exts.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+    exts.extend_from_slice(&sni_ext);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0x22; 32]);
+    body.push(0);
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+    body.extend_from_slice(&[0x01, 0x00]);
+    body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+    body.extend_from_slice(&exts);
+
+    let mut hs = vec![
+        0x01,
+        ((body.len() >> 16) & 0xFF) as u8,
+        ((body.len() >> 8) & 0xFF) as u8,
+        (body.len() & 0xFF) as u8,
+    ];
+    hs.extend_from_slice(&body);
+
+    let mut rec = vec![0x16, 0x03, 0x01];
+    rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    rec.extend_from_slice(&hs);
+    rec
+}
+
+#[tokio::test]
+async fn e2e_fragmented_post_quantum_tls_client_hello_recovers_sni() {
+    let (socks_addr, recorded_targets, socks_handle) = spawn_mock_socks5_server().await;
+
+    let mut proxies = HashMap::new();
+    proxies.insert(
+        "local".to_string(),
+        ProxyConfig {
+            kind: ProxyKind::Socks5,
+            address: socks_addr.to_string(),
+            username: None,
+            password: None,
+            udp: true,
+        },
+    );
+
+    let cfg = Config {
+        general: GeneralConfig::default(),
+        proxies,
+        rules: vec![builtin_preset_rule("antigravity", "local").unwrap()],
+    };
+
+    let (mock_cap, mut inbound_rx, _direct_rx) = MockCaptureEngine::new();
+    let tracker = antigravity_process_tree();
+    let engine = ProxyEngine::new(cfg, mock_cap.clone(), tracker).unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let engine_task = tokio::spawn(engine.run(shutdown_rx));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let client_ip = Ipv4Addr::new(10, 77, 0, 2);
+    let poisoned_ip = Ipv4Addr::new(198, 51, 100, 77);
+    let client_port = 57777u16;
+    mock_cap.map_tuple_pid(
+        FiveTuple {
+            protocol: TransportProtocol::Tcp,
+            src_ip: IpAddr::V4(client_ip),
+            src_port: client_port,
+            dst_ip: IpAddr::V4(poisoned_ip),
+            dst_port: 443,
+        },
+        5001,
+    );
+
+    let mut sim_dev = SimDevice {
+        rx: VecDeque::new(),
+        tx: VecDeque::new(),
+    };
+    let origin = Instant::now();
+    let mut sim_iface = Interface::new(
+        IfaceConfig::new(HardwareAddress::Ip),
+        &mut sim_dev,
+        SmolInstant::from_millis(0),
+    );
+    sim_iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(10, 77, 0, 2), 0));
+    });
+    let _ = sim_iface
+        .routes_mut()
+        .add_default_ipv4_route(Ipv4Address::new(10, 77, 0, 1));
+    let mut sim_sockets = SocketSet::new(vec![]);
+    let sock_h = sim_sockets.add(TcpSocket::new(
+        TcpSocketBuffer::new(vec![0u8; 16384]),
+        TcpSocketBuffer::new(vec![0u8; 16384]),
+    ));
+    sim_sockets
+        .get_mut::<TcpSocket>(sock_h)
+        .connect(
+            sim_iface.context(),
+            IpEndpoint::new(IpAddress::v4(198, 51, 100, 77), 443),
+            client_port,
+        )
+        .unwrap();
+
+    // 1800-byte ClientHello guarantees >= 2 TCP segments over 1500-byte MTU, placing SNI in segment 2.
+    let large_hello = build_large_post_quantum_client_hello("pq-sni.googleapis.com", 1600);
+    assert!(large_hello.len() > 1650);
+
+    let mut offset = 0usize;
+    let mut received = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    while Instant::now() < deadline {
+        let now = SmolInstant::from_millis(origin.elapsed().as_millis() as i64);
+        sim_iface.poll(now, &mut sim_dev, &mut sim_sockets);
+        while let Some(p) = sim_dev.tx.pop_front() {
+            mock_cap.emit_outbound(p, 5).await;
+        }
+        while let Ok((in_p, _)) = inbound_rx.try_recv() {
+            sim_dev.rx.push_back(in_p);
+        }
+
+        let s = sim_sockets.get_mut::<TcpSocket>(sock_h);
+        if offset < large_hello.len() && s.may_send() {
+            // Deliberately split sends into two chunks separated across poll ticks.
+            let chunk_end = if offset == 0 {
+                700.min(large_hello.len())
+            } else {
+                large_hello.len()
+            };
+            if let Ok(n) = s.send_slice(&large_hello[offset..chunk_end]) {
+                offset += n;
+            }
+        }
+        if s.can_recv() {
+            let mut tmp = vec![0u8; 4096];
+            if let Ok(n) = s.recv_slice(&mut tmp) {
+                received.extend_from_slice(&tmp[..n]);
+            }
+        }
+        if received.len() >= 5 + large_hello.len() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    assert!(received.starts_with(b"ECHO:"));
+    assert_eq!(&received[5..], large_hello.as_slice());
+
+    let targets = recorded_targets.lock().unwrap().clone();
+    assert!(
+        targets.contains(&"TCP:pq-sni.googleapis.com:443".to_string()),
+        "expected fragmented post-quantum SNI in SOCKS5 target list, got {targets:?}"
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = engine_task.await;
+    socks_handle.abort();
+}

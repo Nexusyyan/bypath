@@ -216,6 +216,8 @@ impl ProxyEngine {
                 _ = gc_interval.tick() => {
                     let now = Instant::now();
                     self.flow_cache.retain(|_, v| now.duration_since(v.last_seen) < FLOW_CACHE_TTL);
+                    let rt = Arc::clone(&self.runtime.read().expect("runtime config lock poisoned"));
+                    refresh_exempt_proxy_pids(&rt.config, &rt.rules, self.capture.as_ref());
                 }
                 maybe_pkt = pkt_rx.recv() => {
                     match maybe_pkt {
@@ -242,23 +244,7 @@ impl ProxyEngine {
 fn build_runtime_config(config: Config, capture: &dyn CaptureEngine) -> Result<RuntimeConfig> {
     config.validate()?;
     let rules = Arc::new(RuleEngine::from_config(&config)?);
-
-    // Auto-discover and exempt local upstream proxy listener PIDs to prevent routing loops.
-    for (name, proxy) in &config.proxies {
-        if let Ok(addr) = proxy.parse_socket_addr() {
-            if addr.ip().is_loopback() {
-                if let Some(pid) = capture.find_local_tcp_listener_pid(addr.port()) {
-                    rules.add_exempt_pid(pid);
-                    info!(
-                        proxy = %name,
-                        address = %addr,
-                        pid,
-                        "auto-exempted local upstream proxy PID (anti-loop)"
-                    );
-                }
-            }
-        }
-    }
+    refresh_exempt_proxy_pids(&config, &rules, capture);
 
     let proxies = Arc::new(config.proxies.clone());
     Ok(RuntimeConfig {
@@ -266,6 +252,27 @@ fn build_runtime_config(config: Config, capture: &dyn CaptureEngine) -> Result<R
         rules,
         proxies,
     })
+}
+
+fn refresh_exempt_proxy_pids(config: &Config, rules: &RuleEngine, capture: &dyn CaptureEngine) {
+    // Auto-discover and exempt local upstream proxy listener PIDs to prevent routing loops,
+    // including when the user restarts their local proxy client at runtime.
+    for (name, proxy) in &config.proxies {
+        if let Ok(addr) = proxy.parse_socket_addr() {
+            if addr.ip().is_loopback() {
+                if let Some(pid) = capture.find_local_tcp_listener_pid(addr.port()) {
+                    if rules.add_exempt_pid(pid) {
+                        info!(
+                            proxy = %name,
+                            address = %addr,
+                            pid,
+                            "auto-exempted local upstream proxy PID (anti-loop)"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn dispatch_packet(ctx: &EngineCtx, pkt: CapturedPacket) {

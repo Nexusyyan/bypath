@@ -1,24 +1,30 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AgentInfo,
   Config,
   ConfigSnapshot,
   ConnectionRecord,
   DaemonStatus,
   DoctorReport,
   EngineEvent,
+  LogEntry,
   NamedProxyProbe,
   PresetInfo,
   ProcessEntry,
   ProxyConfig,
+  RuleTestQuery,
+  RuleTestReport,
   ServiceStateSummary,
+  SystemProxyInfo,
+  TrayStatePayload,
+  UpdateCheckReport,
 } from "./types";
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-// Browser preview state used exclusively when opening Vite directly outside Tauri.
 const previewPresets: PresetInfo[] = [
   {
     id: "antigravity",
@@ -100,6 +106,10 @@ let previewConfig: Config = {
     block_quic_when_no_udp: true,
     bypass_lan: true,
     windivert_dir: "runtime/windivert",
+    minimize_to_tray: true,
+    auto_start_engine: false,
+    theme: "system",
+    auto_check_updates: true,
   },
   proxies: {
     local_socks: {
@@ -218,73 +228,22 @@ let previewConnections: ConnectionRecord[] = [
     ended_at_ms: now - 34_000,
     error: "Blocked domain 'play.googleapis.com' by rule 'Blocked Domains'",
   },
+];
+
+const previewLogs: LogEntry[] = [
   {
-    id: 29,
-    pid: 31204,
-    process_name: "Antigravity.exe",
-    exe_path:
-      "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe",
-    protocol: "tcp",
-    src_addr: "192.168.1.24:58290",
-    dst_ip: "142.250.71.131",
-    dst_port: 443,
-    sniffed_host: "www.gstatic.com",
-    sniff_kind: "SNI",
-    rule_name: "Preset: Antigravity",
-    proxy_name: "local_socks",
-    action: "proxy",
-    state: "active",
-    bytes_tx: 8_310,
-    bytes_rx: 296_540,
-    started_at_ms: now - 52_000,
-    updated_at_ms: now - 1_500,
-    ended_at_ms: null,
-    error: null,
+    id: 2,
+    timestamp_ms: now - 8_000,
+    level: "INFO",
+    target: "bypath_core::engine",
+    message: "bypath engine started",
   },
   {
-    id: 28,
-    pid: 18940,
-    process_name: "git-remote-https.exe",
-    exe_path: "C:\\Program Files\\Git\\mingw64\\libexec\\git-core\\git-remote-https.exe",
-    protocol: "tcp",
-    src_addr: "192.168.1.24:58102",
-    dst_ip: "140.82.121.4",
-    dst_port: 443,
-    sniffed_host: "github.com",
-    sniff_kind: "SNI",
-    rule_name: "Preset: Git & SSH CLI",
-    proxy_name: "local_socks",
-    action: "proxy",
-    state: "closed",
-    bytes_tx: 124_400,
-    bytes_rx: 1_842_000,
-    started_at_ms: now - 95_000,
-    updated_at_ms: now - 82_000,
-    ended_at_ms: now - 82_000,
-    error: null,
-  },
-  {
-    id: 27,
-    pid: 43180,
-    process_name: "language_server.exe",
-    exe_path:
-      "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
-    protocol: "tcp",
-    src_addr: "192.168.1.24:58011",
-    dst_ip: "142.250.66.202",
-    dst_port: 443,
-    sniffed_host: "oauth2.googleapis.com",
-    sniff_kind: "SNI",
-    rule_name: "Preset: Antigravity",
-    proxy_name: "local_socks",
-    action: "proxy",
-    state: "closed",
-    bytes_tx: 4_120,
-    bytes_rx: 11_480,
-    started_at_ms: now - 115_000,
-    updated_at_ms: now - 110_000,
-    ended_at_ms: now - 110_000,
-    error: null,
+    id: 1,
+    timestamp_ms: now - 12_000,
+    level: "INFO",
+    target: "bypath_windivert::windows_engine",
+    message: "loaded WinDivert.dll dynamically",
   },
 ];
 
@@ -306,6 +265,8 @@ export const api = {
       windivert_dll_path: "runtime/windivert\\WinDivert.dll",
       windivert_version: "v2.2",
       windivert_error: null,
+      windivert_error_kind: null,
+      portable_mode: false,
       config_path: "C:\\ProgramData\\Bypath\\config.toml",
       active_rules_count: previewConfig.rules.filter((r) => r.enabled).length,
       total_rules_count: previewConfig.rules.length,
@@ -319,8 +280,8 @@ export const api = {
         proxied_connections: previewConnections.length - blocked,
         blocked_connections: blocked,
         direct_packets: 12_480,
-        total_bytes_tx: 204_990,
-        total_bytes_rx: 2_947_400,
+        total_bytes_tx: 68_160,
+        total_bytes_rx: 797_380,
         tx_bytes_per_sec: previewRunning ? 6_420 : 0,
         rx_bytes_per_sec: previewRunning ? 48_960 : 0,
       },
@@ -392,25 +353,10 @@ export const api = {
         matched_rule: "Preset: Antigravity",
       },
       {
-        pid: 43180,
-        parent_pid: 31204,
-        name: "language_server.exe",
-        exe_path:
-          "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
-        matched_rule: "Preset: Antigravity",
-      },
-      {
         pid: 22410,
         parent_pid: 4120,
         name: "Code.exe",
         exe_path: "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
-        matched_rule: null,
-      },
-      {
-        pid: 42276,
-        parent_pid: 4120,
-        name: "xray.exe",
-        exe_path: "C:\\Tools\\v2rayN\\bin\\xray\\xray.exe",
         matched_rule: null,
       },
     ];
@@ -435,12 +381,15 @@ export const api = {
       windivert_driver_opened: true,
       windivert_version: "v2.2",
       windivert_error: null,
+      windivert_error_kind: null,
       proxies: Object.entries(previewConfig.proxies).map(([name, p]) => ({
         name,
         report: {
           address: p.address,
           kind: p.type,
           tcp_reachable: true,
+          handshake_ok: true,
+          auth_ok: null,
           latency_ms: 1,
           udp_associate_supported: p.type === "socks5",
           error: null,
@@ -460,6 +409,8 @@ export const api = {
         address: proxy.address,
         kind: proxy.type,
         tcp_reachable: true,
+        handshake_ok: true,
+        auth_ok: null,
         latency_ms: 1,
         udp_associate_supported: proxy.type === "socks5",
         error: null,
@@ -473,6 +424,131 @@ export const api = {
       return invoke<PresetInfo[]>("list_presets");
     }
     return previewPresets;
+  },
+
+  async getSystemProxy(): Promise<SystemProxyInfo> {
+    if (isTauriRuntime()) {
+      return invoke<SystemProxyInfo>("get_system_proxy");
+    }
+    return {
+      enabled: true,
+      source: "windows_registry",
+      raw_server: "127.0.0.1:7897",
+      socks_address: null,
+      http_address: "127.0.0.1:7897",
+      bypass_list: "localhost;<local>",
+      suggested_kind: "http",
+      suggested_address: "127.0.0.1:7897",
+    };
+  },
+
+  async testRule(query: RuleTestQuery): Promise<RuleTestReport> {
+    if (isTauriRuntime()) {
+      return invoke<RuleTestReport>("test_rule", { query });
+    }
+    return {
+      phase1_decision: "proxy",
+      phase1_rule: "Preset: Antigravity",
+      phase1_reason: "matched proxy rule -> local_socks",
+      phase2_decision: null,
+      phase2_rule: null,
+      final_action: "proxy",
+      final_proxy: "local_socks",
+      matched_rule: "Preset: Antigravity",
+    };
+  },
+
+  async getLogs(minLevel?: string, limit = 150): Promise<LogEntry[]> {
+    if (isTauriRuntime()) {
+      return invoke<LogEntry[]>("get_logs", {
+        minLevel: minLevel ?? null,
+        limit,
+      });
+    }
+    return previewLogs;
+  },
+
+  async exportConfigToml(): Promise<string> {
+    if (isTauriRuntime()) {
+      return invoke<string>("export_config_toml");
+    }
+    return JSON.stringify(previewConfig, null, 2);
+  },
+
+  async importConfigToml(rawToml: string): Promise<Config> {
+    if (isTauriRuntime()) {
+      return invoke<Config>("import_config_toml", { rawToml });
+    }
+    return structuredClone(previewConfig);
+  },
+
+  async getAgentInfo(): Promise<AgentInfo> {
+    if (isTauriRuntime()) {
+      return invoke<AgentInfo>("get_agent_info");
+    }
+    return {
+      cli_path: "bypath.exe",
+      pipe_name: "\\\\.\\pipe\\bypath-v1",
+      config_path: "C:\\ProgramData\\Bypath\\config.toml",
+      windivert_dir: "runtime\\windivert",
+      portable_mode: false,
+    };
+  },
+
+  async setTrayState(payload: TrayStatePayload): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("set_tray_state", { payload });
+    }
+  },
+
+  async openPathInExplorer(path: string): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("open_path_in_explorer", { path });
+    }
+  },
+
+  async openWindowsSecurity(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("open_windows_security");
+    }
+  },
+
+  async checkForUpdates(): Promise<UpdateCheckReport> {
+    if (isTauriRuntime()) {
+      return invoke<UpdateCheckReport>("check_for_updates");
+    }
+    return {
+      current_version: "0.4.1",
+      latest_version: "0.4.1",
+      latest_tag: "v0.4.1",
+      update_available: false,
+      release_name: "Bypath v0.4.1",
+      release_url: "https://github.com/Nexusyyan/bypath/releases",
+      published_at: new Date().toISOString(),
+      release_notes: null,
+      primary_asset_name: null,
+      primary_asset_url: null,
+      primary_asset_size: null,
+      nodriver_asset_name: null,
+      nodriver_asset_url: null,
+      checked_via: "preview",
+      checked_at_ms: Date.now(),
+    };
+  },
+
+  async openExternalUrl(url: string): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("open_external_url", { url });
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  },
+
+  async pickDirectory(title?: string): Promise<string | null> {
+    if (isTauriRuntime()) {
+      return invoke<string | null>("pick_directory", { title: title ?? null });
+    }
+    return null;
   },
 
   async getServiceStatus(): Promise<ServiceStateSummary> {

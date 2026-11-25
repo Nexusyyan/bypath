@@ -4,11 +4,11 @@
 
 <p align="center">
   <strong>Open-source per-application transparent proxy &amp; domain control in Rust.</strong><br />
-  Route selected apps and their full child process trees through SOCKS5 or HTTP proxies — with zero TUN adapters and zero routing table changes.
+  Route selected apps and their full child process trees through SOCKS5 or HTTP proxies — with zero TUN adapters, zero routing table changes, one-click novice UX, and native AI Agent / MCP automation.
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="DESIGN.md">Design System</a>
+  <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="DESIGN.md">Design System</a> · <a href="skills/bypath-agent/SKILL.md">Agent Skill</a>
 </p>
 
 ---
@@ -17,75 +17,74 @@ Bypath transparently intercepts TCP and UDP traffic of selected desktop applicat
 
 ## Key Features
 
+- **Out-of-the-box GitHub Release experience**: Download the recommended `bypath-<tag>-windows-x64.zip` (bundled with official SHA-256 & Authenticode verified `WinDivert.dll` + `WinDivert64.sys` and full LGPLv3 notices, zero sample tools), launch `bypath-gui.exe`, adjust your proxy port if needed, authorize `BypathService` once, and toggle proxying in one click. A clean `-nodriver.zip` variant is also published for restricted AV environments.
 - **Zero global routing conflicts**: Works alongside corporate VPNs, WSL2, Docker Desktop, Hyper-V, and LAN devices without touching the OS routing table.
-- **Full process tree & directory matching**: Automatically inherits spawned child processes (`language_server.exe`, MCP servers, CLI helpers), accelerated by O(1) per-PID `NtQueryInformationProcess` resolution and WinDivert `SOCKET` cache pre-warming.
-- **DNS poisoning immunity & SNI domain blocking**: Built-in TLS SNI, HTTP `Host`, and QUIC Initial inspection recovers true hostnames for remote upstream resolution (`ATYP=0x03` / `CONNECT host:port`) and enforces exact, wildcard (`*.example.com`), and glob domain blocking rules before dialing upstream.
-- **QUIC / UDP governance**: Supports RFC 1928 SOCKS5 `UDP ASSOCIATE`, plus automatic QUIC (`UDP/443`) fallback dropping when an upstream proxy is TCP-only or when domain-blocking rules require TLS SNI inspection.
-- **Live connection monitor with process tabs, sorting & pagination**: Filter real-time streams by per-process tabs, sort by time, traffic, upload/download, process, destination, protocol, or state, paginate large histories cleanly, and block unwanted domains in one click.
-- **Zero-restart hot reload**: Toggle presets, edit rules, add blocked domains, or switch upstream proxies live without dropping the WinDivert handle or active TCP streams.
-- **Windows Service + Named Pipe IPC**: Install `BypathService` once as `LocalSystem` so the desktop GUI and CLI talk over `\\.\pipe\bypath-v1` (secured with local-interactive SDDL ACLs and remote-client rejection) without daily Administrator terminals or UAC prompts.
-- **Crash-safe & LGPLv3 compliant**: Dynamically loads official signed `WinDivert 2.2+` at runtime via `libloading`; if the process exits or crashes, Windows immediately releases the kernel filter with zero residual network breakage.
-
-## Architecture
-
-- `crates/bypath-core`: Platform-agnostic capture traits, fast process-tree tracker, hot-reloadable two-phase rule engine (L4 process/port/CIDR + L7 SNI/Host domain rules), TLS/HTTP/QUIC sniffer, `smoltcp` userspace TCP/IP netstack, live telemetry hub (`TelemetryHub`), and SOCKS5/HTTP upstream dialers.
-- `crates/bypath-windivert`: Windows capture backend using runtime-loaded `WinDivert.dll` + `SOCKET`/`FLOW`/`NETWORK` layers + `GetExtendedTcpTable`/`GetExtendedUdpTable` fallback.
-- `crates/bypath-ipc`: Cross-platform NDJSON IPC protocol and secure Windows Named Pipe (`\\.\pipe\bypath-v1`) server/client.
-- `crates/bypath-daemon`: Shared `DaemonController`, Windows Service (`BypathService`) SCM integration, and standalone daemon binary (`bypath-daemon.exe`).
-- `crates/bypath-cli`: CLI runner (`run`), diagnostics (`doctor`), process inspector (`ps`), service installer (`service`), and Named Pipe remote control (`ctl`).
-- `apps/desktop`: Minimalist Tauri v2 + React + TypeScript desktop client (`bypath-gui.exe`) with bilingual `zh-CN`/`en` UI, system tray, process-tabbed connection monitor, domain blocklist manager, one-click presets, running process picker, proxy probe tester, and service manager.
+- **Full process tree & directory matching**: Automatically inherits spawned child processes (`language_server.exe`, MCP servers, CLI helpers), accelerated by O(1) per-PID `NtQueryInformationProcess` resolution, WinDivert `SOCKET` cache pre-warming, and dynamic upstream-proxy anti-loop PID refresh.
+- **Post-quantum TLS SNI sniffing & two-phase domain rules**: Accumulates fragmented multi-segment TLS ClientHellos (such as Chrome/Electron/Go `X25519MLKEM768`) alongside HTTP `Host` and QUIC Initial detection, enabling clean remote DNS resolution (`ATYP=0x03` / `CONNECT host:port`) plus exact, wildcard (`*.example.com`), and glob domain `Block` / `Direct` / `Proxy` overrides.
+- **Desktop ergonomics & observability**: System tray minimization with dynamic bilingual status menu, Win32 single-instance guard, Light / Pure Charcoal Dark / System themes, proxy-aware GitHub Release update checker, custom rounded controls, persistent tab state, keyboard shortcuts (`Ctrl+K`, `Ctrl+1..4`, `Space`, `Esc`), 60-second throughput sparklines, process/domain summary aggregation, live daemon log viewer, rule priority reordering, dry-run rule match tester, and TOML/CSV import/export + Portable Mode (`portable.json`).
+- **AI Agent & DIY first-class interfaces**: Built-in stdio MCP Server (`bypath mcp`) and structured JSON CLI (`bypath ctl --json`) let Antigravity, Claude Code, or Cursor inspect Windows system proxies, edit/reorder rules, run dry-run rule tests, check for updates, and analyze live logs automatically.
 
 ## Quick Start (Windows 10/11 x64)
 
-### 1. Download Signed WinDivert 2.2.2-A Runtime (LGPLv3)
+### Option A — Download from GitHub Releases (Recommended)
+
+1. Download and extract **`bypath-v0.4.1-windows-x64.zip`** from [GitHub Releases](https://github.com/Nexusyyan/bypath/releases).
+2. Double-click **`bypath-gui.exe`**.
+3. If your local proxy uses a port other than `127.0.0.1:10808` (for example Clash `127.0.0.1:7897`), click **Edit Proxy** (or **Read System Proxy** inside **Proxies**), save, and click **Authorize & Start Service** once.
+4. Toggle presets (e.g. **Antigravity**, **Cursor**, **VS Code**, **Git**) and click **Start Proxying**. Closing the window minimizes Bypath quietly to the system tray.
+
+> **Portable Mode**: Drop an empty `portable.json` (`{"portable":true}`) next to `bypath-gui.exe` to keep `config.toml` and `logs/` inside `./bypath-data/`.
+
+### Option B — Build from Source
 
 ```powershell
+# 1. Fetch official signed WinDivert 2.2.2-A runtime (pass -Proxy http://127.0.0.1:7897 if needed)
 .\scripts\fetch-windivert.ps1
-```
 
-> **Windows Defender notice**: Windows Defender may heuristically flag WinDivert packages as PUA/HackTool because WinDivert is a kernel packet-interception driver. The fetch script verifies the official SHA-256 hash and Authenticode signature of `WinDivert64.sys`. If quarantined, allow `runtime\windivert\WinDivert.dll` and `WinDivert64.sys` in Windows Security -> Protection history (or add a folder exclusion for `runtime\windivert`).
-
-### 2. Build Core, Daemon, CLI, and Desktop GUI
-
-```powershell
-# Build CLI + Background Service Daemon
+# 2. Build CLI + Background Service Daemon
 cargo build --workspace --release
 
-# Build Tauri v2 Desktop GUI (embeds production frontend assets)
+# 3. Build Tauri v2 Desktop GUI (embeds production frontend assets)
 npm --prefix apps/desktop install
 npm --prefix apps/desktop run tauri:build
 ```
 
-Outputs:
-- `target\release\bypath.exe` (CLI)
-- `target\release\bypath-daemon.exe` (Windows Service / IPC daemon)
-- `apps\desktop\src-tauri\target\release\bypath-gui.exe` (Desktop GUI)
+### AI Agent / MCP DIY Automation
 
-### 3. Option A — Desktop GUI + Background Windows Service (Recommended)
+Connect Antigravity, Claude Code, or Cursor directly to Bypath's built-in stdio MCP server:
 
-1. Install and start `BypathService` once (either from **Diagnostics -> Install & Start Service** inside the GUI, or from an Administrator PowerShell):
-   ```powershell
-   .\target\release\bypath.exe service install
-   .\target\release\bypath.exe service start
-   ```
-2. Launch `apps\desktop\src-tauri\target\release\bypath-gui.exe` as a normal user (no UAC needed).
-3. Verify your upstream proxy in **Proxies** (e.g. `127.0.0.1:10808`), toggle presets in **Applications**, add optional blocked domains, and click **Start Proxying**.
+```json
+{
+  "mcpServers": {
+    "bypath": {
+      "command": "C:\\path\\to\\bypath.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
-### 4. Option B — Standalone CLI
+Or drive everything with structured JSON from any terminal:
 
 ```powershell
-# Diagnostics (Administrator PowerShell required for live WinDivert probe)
-.\target\release\bypath.exe doctor --proxy socks5://127.0.0.1:10808
-
-# Zero-config per-app proxy with domain blocking
-.\target\release\bypath.exe run --proxy socks5://127.0.0.1:10808 --preset antigravity --block-domain "*.doubleclick.net"
-
-# Control running background daemon over Named Pipe IPC
-.\target\release\bypath.exe ctl status
-.\target\release\bypath.exe ctl start
-.\target\release\bypath.exe ctl connections
-.\target\release\bypath.exe ctl stop
+.\bypath.exe ctl --json status
+.\bypath.exe ctl --json system-proxy
+.\bypath.exe ctl --json rule test --process Antigravity.exe --host aicode.googleapis.com --port 443
+.\bypath.exe ctl --json logs --level WARN --limit 50
+.\bypath.exe ctl --json update
+.\bypath.exe ctl schema
 ```
+
+See [skills/bypath-agent/SKILL.md](skills/bypath-agent/SKILL.md) for complete Agent workflows.
+
+## Architecture
+
+- `crates/bypath-core`: Capture traits, fast process-tree tracker, two-phase rule engine with dry-run explainer, multi-segment TLS/HTTP/QUIC sniffer, `smoltcp` userspace TCP/IP netstack, `TelemetryHub` + live `LogRingBuffer`, real handshake proxy probe, and on-demand Windows system proxy reader.
+- `crates/bypath-windivert`: Runtime-loaded `WinDivert.dll` + `SOCKET`/`FLOW`/`NETWORK` layers + IPHelper fallback with structured error diagnostics.
+- `crates/bypath-ipc`: NDJSON RPC + event/log streaming over Windows Named Pipe (`\\.\pipe\bypath-v1`, local-interactive SDDL ACLs, remote-client rejection).
+- `crates/bypath-daemon`: Shared `DaemonController`, Windows Service (`BypathService`), rolling log writer, and `bypath-daemon.exe`.
+- `crates/bypath-cli`: Foreground runner (`run`), diagnostics (`doctor`), process list (`ps`), service manager (`service`), full JSON automation CLI (`ctl --json`), and native stdio MCP server (`mcp`).
+- `apps/desktop`: Minimalist Tauri v2 + React + TypeScript desktop app (`bypath-gui.exe`) with self-hosted service fallback, Win32 single-instance guard, bilingual dynamic system tray, Light/Dark/System theme, and full rule/proxy/log observability UI.
 
 ## License
 

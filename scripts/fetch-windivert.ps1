@@ -5,7 +5,8 @@ param(
     [string]$Version = "2.2.2-A",
     [string]$Tag = "v2.2.2",
     [string]$ExpectedSha256 = "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15",
-    [string]$OutputDir = (Join-Path $PSScriptRoot "..\runtime\windivert")
+    [string]$OutputDir = (Join-Path $PSScriptRoot "..\runtime\windivert"),
+    [string]$Proxy = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +21,20 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 try {
     Write-Host "Downloading WinDivert $Version from $Url ..."
-    Invoke-WebRequest -Uri $Url -OutFile $ZipPath -UseBasicParsing
+    if ($Proxy) {
+        $CurlExe = Join-Path $env:SystemRoot "System32\curl.exe"
+        if (Test-Path $CurlExe) {
+            Write-Host "Using proxy $Proxy via curl.exe ..."
+            & $CurlExe -fSL --proxy $Proxy -o $ZipPath $Url
+            if ($LASTEXITCODE -ne 0) {
+                throw "curl.exe failed with exit code $LASTEXITCODE"
+            }
+        } else {
+            Invoke-WebRequest -Uri $Url -OutFile $ZipPath -Proxy $Proxy -UseBasicParsing
+        }
+    } else {
+        Invoke-WebRequest -Uri $Url -OutFile $ZipPath -UseBasicParsing
+    }
 
     $Hash = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash
     Write-Host "Archive SHA-256: $Hash"

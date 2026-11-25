@@ -1,11 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fmt::Write as _;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+use tracing::field::{Field, Visit};
+use tracing::Subscriber;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::Layer;
 
 const MAX_RETAINED_CONNECTIONS: usize = 500;
+const MAX_RETAINED_LOGS: usize = 500;
+const MAX_LOG_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const BYTE_BROADCAST_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +83,15 @@ pub struct EngineStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub id: u64,
+    pub timestamp_ms: u64,
+    pub level: String,
+    pub target: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineEvent {
     StatsTick {
@@ -89,6 +108,9 @@ pub enum EngineEvent {
     StateChanged {
         running: bool,
         error: Option<String>,
+    },
+    LogEntry {
+        entry: LogEntry,
     },
 }
 
@@ -124,6 +146,7 @@ pub struct NewConnectionParams {
 /// Thread-safe live telemetry store and broadcast hub shared between the engine, IPC, and GUI.
 pub struct TelemetryHub {
     next_id: AtomicU64,
+    next_log_id: AtomicU64,
     running: AtomicBool,
     active_connections: AtomicU64,
     total_connections: AtomicU64,
@@ -134,6 +157,8 @@ pub struct TelemetryHub {
     total_bytes_rx: AtomicU64,
     rate_state: RwLock<RateState>,
     connections: RwLock<VecDeque<StoredConnection>>,
+    logs: RwLock<VecDeque<LogEntry>>,
+    log_file: RwLock<Option<PathBuf>>,
     events_tx: broadcast::Sender<EngineEvent>,
 }
 
@@ -142,6 +167,7 @@ impl Default for TelemetryHub {
         let (events_tx, _) = broadcast::channel(512);
         Self {
             next_id: AtomicU64::new(1),
+            next_log_id: AtomicU64::new(1),
             running: AtomicBool::new(false),
             active_connections: AtomicU64::new(0),
             total_connections: AtomicU64::new(0),
@@ -152,6 +178,8 @@ impl Default for TelemetryHub {
             total_bytes_rx: AtomicU64::new(0),
             rate_state: RwLock::new(RateState::default()),
             connections: RwLock::new(VecDeque::with_capacity(MAX_RETAINED_CONNECTIONS)),
+            logs: RwLock::new(VecDeque::with_capacity(MAX_RETAINED_LOGS)),
+            log_file: RwLock::new(None),
             events_tx,
         }
     }
@@ -475,6 +503,71 @@ impl TelemetryHub {
         });
     }
 
+    /// Configures an optional rolling log file path for durable daemon diagnostics.
+    pub fn set_log_file(&self, path: PathBuf) {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        if let Ok(mut guard) = self.log_file.write() {
+            *guard = Some(path);
+        }
+    }
+
+    /// Appends a structured log entry into the bounded ring buffer, optional rolling file,
+    /// and live IPC event broadcast.
+    pub fn push_log(&self, level: &str, target: &str, message: String) {
+        let id = self.next_log_id.fetch_add(1, Ordering::Relaxed);
+        let timestamp_ms = unix_timestamp_ms();
+        let entry = LogEntry {
+            id,
+            timestamp_ms,
+            level: level.to_ascii_uppercase(),
+            target: target.to_string(),
+            message,
+        };
+
+        if let Ok(mut ring) = self.logs.write() {
+            ring.push_front(entry.clone());
+            while ring.len() > MAX_RETAINED_LOGS {
+                ring.pop_back();
+            }
+        }
+
+        if let Ok(guard) = self.log_file.read() {
+            if let Some(ref path) = *guard {
+                append_log_line(path, &entry);
+            }
+        }
+
+        let _ = self.events_tx.send(EngineEvent::LogEntry { entry });
+    }
+
+    /// Returns recent log entries newest-first, optionally filtered by minimum severity level.
+    pub fn list_logs(&self, min_level: Option<&str>, limit: Option<usize>) -> Vec<LogEntry> {
+        let threshold = min_level.map(log_level_rank).unwrap_or(0);
+        let max_items = limit.unwrap_or(200).clamp(1, MAX_RETAINED_LOGS);
+        self.logs
+            .read()
+            .ok()
+            .map(|ring| {
+                ring.iter()
+                    .filter(|e| log_level_rank(&e.level) >= threshold)
+                    .take(max_items)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Creates a `tracing_subscriber::Layer` that feeds structured Bypath events into this hub.
+    pub fn log_layer(self: &Arc<Self>) -> TelemetryLogLayer {
+        TelemetryLogLayer {
+            hub: Arc::clone(self),
+        }
+    }
+
     /// Computes live TX/RX throughput rates over the elapsed sample window and emits `StatsTick`.
     pub fn sample_rates_and_emit(&self) -> EngineStats {
         let now = Instant::now();
@@ -572,6 +665,98 @@ fn decrement_saturating(counter: &AtomicU64) {
             Ok(_) => break,
             Err(next) => cur = next,
         }
+    }
+}
+
+/// Lightweight `tracing` layer mirroring Bypath diagnostic events into `TelemetryHub`.
+pub struct TelemetryLogLayer {
+    hub: Arc<TelemetryHub>,
+}
+
+#[derive(Default)]
+struct FieldMessageVisitor {
+    message: String,
+    fields: String,
+}
+
+impl Visit for FieldMessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(&mut self.message, "{value:?}");
+        } else {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            let _ = write!(&mut self.fields, "{}={value:?}", field.name());
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message.push_str(value);
+        } else {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            let _ = write!(&mut self.fields, "{}={value}", field.name());
+        }
+    }
+}
+
+impl<S: Subscriber> Layer<S> for TelemetryLogLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let meta = event.metadata();
+        let target = meta.target();
+        let level_str = meta.level().as_str();
+        let is_bypath = target.starts_with("bypath");
+        let is_important = log_level_rank(level_str) >= 3; // WARN or ERROR
+        if !is_bypath && !is_important {
+            return;
+        }
+        if log_level_rank(level_str) < 2 {
+            // Skip TRACE/DEBUG from UI ring buffer to keep diagnostics focused and readable.
+            return;
+        }
+
+        let mut visitor = FieldMessageVisitor::default();
+        event.record(&mut visitor);
+        let msg = if visitor.fields.is_empty() {
+            visitor.message
+        } else if visitor.message.is_empty() {
+            visitor.fields
+        } else {
+            format!("{} ({})", visitor.message, visitor.fields)
+        };
+        if !msg.is_empty() {
+            self.hub.push_log(level_str, target, msg);
+        }
+    }
+}
+
+fn log_level_rank(level: &str) -> u8 {
+    match level.trim().to_ascii_uppercase().as_str() {
+        "ERROR" => 4,
+        "WARN" | "WARNING" => 3,
+        "INFO" => 2,
+        "DEBUG" => 1,
+        _ => 0,
+    }
+}
+
+fn append_log_line(path: &PathBuf, entry: &LogEntry) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() >= MAX_LOG_FILE_BYTES {
+            let backup = path.with_extension("log.old");
+            let _ = std::fs::remove_file(&backup);
+            let _ = std::fs::rename(path, backup);
+        }
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(
+            file,
+            "[{}] [{}] [{}] {}",
+            entry.timestamp_ms, entry.level, entry.target, entry.message
+        );
     }
 }
 

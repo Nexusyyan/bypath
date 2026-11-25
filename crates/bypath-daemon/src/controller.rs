@@ -2,13 +2,15 @@ use crate::service::query_service_status;
 use anyhow::{anyhow, Result};
 use bypath_core::capture::{CaptureEngine, FiveTuple, TransportProtocol};
 use bypath_core::config::{
-    list_builtin_presets, resolve_windivert_dir, Config, ProxyConfig,
+    default_log_path, is_portable_mode, list_builtin_presets, resolve_windivert_dir, Config,
+    ProxyConfig,
 };
 use bypath_core::engine::{EngineHandle, ProxyEngine};
 use bypath_core::process::{ProcessTracker, SnapshotProcessTracker};
-use bypath_core::rules::{RouteDecision, RuleEngine};
-use bypath_core::telemetry::{EngineEvent, TelemetryHub};
+use bypath_core::rules::{RouteDecision, RuleEngine, RuleTestQuery, RuleTestReport};
+use bypath_core::telemetry::{EngineEvent, LogEntry, TelemetryHub};
 use bypath_core::upstream::probe::probe_proxy;
+use bypath_core::upstream::system_proxy::{read_system_proxy, SystemProxyInfo};
 use bypath_ipc::{
     BackendMode, ConfigSnapshot, DaemonStatus, DoctorReport, IpcHandler, IpcRequest, IpcResponse,
     NamedProxyProbe, ProcessEntry,
@@ -61,12 +63,17 @@ impl DaemonController {
             Config::starter_default(resolve_windivert_dir(None).display().to_string())
         };
 
+        let telemetry = TelemetryHub::new();
+        if backend_mode == BackendMode::Service {
+            telemetry.set_log_file(default_log_path());
+        }
+
         Ok(Arc::new(Self {
             backend_mode,
             config_path,
             config: RwLock::new(config),
             tracker: Arc::new(SnapshotProcessTracker::default()),
-            telemetry: TelemetryHub::new(),
+            telemetry,
             active: Mutex::new(None),
             last_error: Arc::new(RwLock::new(None)),
         }))
@@ -211,6 +218,8 @@ impl DaemonController {
             windivert_dll_path: wd.dll_path,
             windivert_version: wd.driver_version.map(|(maj, min)| format!("v{maj}.{min}")),
             windivert_error: wd.error,
+            windivert_error_kind: wd.error_kind,
+            portable_mode: is_portable_mode(),
             config_path: self.config_path.display().to_string(),
             active_rules_count,
             total_rules_count: cfg.rules.len(),
@@ -290,8 +299,23 @@ impl DaemonController {
             windivert_driver_opened: wd.driver_opened,
             windivert_version: wd.driver_version.map(|(maj, min)| format!("v{maj}.{min}")),
             windivert_error: wd.error,
+            windivert_error_kind: wd.error_kind,
             proxies: probes,
         }
+    }
+
+    pub fn test_rule(&self, query: &RuleTestQuery) -> Result<RuleTestReport> {
+        let cfg = self.current_config();
+        let engine = RuleEngine::from_config(&cfg)?;
+        Ok(engine.test_query(query))
+    }
+
+    pub fn get_system_proxy(&self) -> SystemProxyInfo {
+        read_system_proxy()
+    }
+
+    pub fn list_logs(&self, min_level: Option<&str>, limit: Option<usize>) -> Vec<LogEntry> {
+        self.telemetry.list_logs(min_level, limit)
     }
 
     fn set_last_error(&self, err: Option<String>) {
@@ -380,6 +404,18 @@ impl IpcHandler for DaemonController {
                 },
                 IpcRequest::ListPresets => IpcResponse::Presets {
                     presets: list_builtin_presets(),
+                },
+                IpcRequest::GetSystemProxy => IpcResponse::SystemProxy {
+                    info: self.get_system_proxy(),
+                },
+                IpcRequest::TestRule { query } => match self.test_rule(&query) {
+                    Ok(report) => IpcResponse::RuleTest { report },
+                    Err(err) => IpcResponse::Error {
+                        message: err.to_string(),
+                    },
+                },
+                IpcRequest::GetLogs { min_level, limit } => IpcResponse::Logs {
+                    entries: self.list_logs(min_level.as_deref(), limit),
                 },
                 IpcRequest::SubscribeEvents => IpcResponse::Subscribed,
             }

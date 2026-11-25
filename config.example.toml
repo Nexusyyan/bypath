@@ -3,8 +3,8 @@
 
 [general]
 log_level = "info"
-# Sniff TLS SNI / HTTP Host / QUIC Initial so upstream proxies resolve domains remotely
-# and domain-level blocking/routing rules can be enforced cleanly.
+# Sniff TLS SNI (including fragmented post-quantum ClientHello) / HTTP Host / QUIC Initial
+# so upstream proxies resolve domains remotely and domain-level rules work cleanly.
 enable_sniffing = true
 # Gracefully drop UDP/443 (QUIC) when the matched upstream proxy does not enable UDP,
 # forcing Chromium/Electron/Google clients to immediately fall back to TCP HTTP/2.
@@ -13,17 +13,25 @@ block_quic_when_no_udp = true
 bypass_lan = true
 # Path to directory containing WinDivert.dll and WinDivert64.sys
 windivert_dir = "runtime/windivert"
+# Hide the desktop window to the Windows system tray when clicking Close
+minimize_to_tray = true
+# Automatically start packet interception when BypathService starts
+auto_start_engine = false
+# Desktop appearance theme: "system" | "light" | "dark"
+theme = "system"
+# Silently check GitHub Releases on desktop startup (at most once every 12h)
+auto_check_updates = true
 
 [proxies.local_socks]
 type = "socks5"          # "socks5" or "http"
-address = "127.0.0.1:7890"
+address = "127.0.0.1:10808"
 # username = ""
 # password = ""
 udp = true               # Enable SOCKS5 UDP ASSOCIATE
 
 [proxies.local_http]
 type = "http"
-address = "127.0.0.1:7890"
+address = "127.0.0.1:7897"
 udp = false
 
 # Example: capture Antigravity and all of its spawned child processes

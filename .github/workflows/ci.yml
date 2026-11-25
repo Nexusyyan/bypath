@@ -14,6 +14,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  hygiene:
+    name: Pure 7-bit ASCII Source Gate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify pure 7-bit ASCII across source files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exts = @(".rs", ".ts", ".tsx", ".js", ".jsx", ".css", ".py", ".ps1", ".yml", ".yaml")
+          $violations = @()
+          foreach ($f in (git ls-files)) {
+            $ext = [System.IO.Path]::GetExtension($f).ToLowerInvariant()
+            if ($exts -contains $ext) {
+              $bytes = [System.IO.File]::ReadAllBytes($f)
+              if ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1) {
+                $violations += $f
+              }
+            }
+          }
+          if ($violations.Count -gt 0) {
+            Write-Error ("Non-ASCII bytes found in source files: " + ($violations -join ", "))
+            exit 1
+          }
+          Write-Host "Pure 7-bit ASCII check passed."
+
   rust:
     name: Rust Core, Daemon & CLI (Windows x64)
     runs-on: windows-latest
@@ -66,8 +94,11 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix apps/desktop ci
 
-      - name: Typecheck and build frontend
-        run: npm --prefix apps/desktop run build
+      - name: Run frontend typecheck, unit tests, and build
+        run: |
+          npm --prefix apps/desktop run typecheck
+          npm --prefix apps/desktop test
+          npm --prefix apps/desktop run build
 
       - name: Run Tauri Clippy (deny warnings)
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings

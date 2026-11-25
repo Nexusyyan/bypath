@@ -7,4 +7,5 @@ pub mod rules;
 pub mod sniff;
 pub mod telemetry;
 pub mod udp_relay;
+pub mod update;
 pub mod upstream;

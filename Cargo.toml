@@ -12,9 +12,15 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -46,5 +52,6 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
     "Win32_System_Threading",
 ] }

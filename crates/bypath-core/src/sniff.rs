@@ -28,7 +28,7 @@ pub fn sniff_udp_payload(data: &[u8]) -> Option<SniffResult> {
     None
 }
 
-/// Extracts the SNI hostname from a TLS 1.0–1.3 ClientHello record.
+/// Extracts the SNI hostname from a TLS 1.0-1.3 ClientHello record.
 pub fn sniff_tls_sni(data: &[u8]) -> Option<String> {
     // TLS record header: 5 bytes
     // byte 0: ContentType = Handshake (0x16)

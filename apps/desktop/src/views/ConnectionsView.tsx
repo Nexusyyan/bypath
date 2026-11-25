@@ -1,9 +1,12 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, type Dispatch, type RefObject, type SetStateAction } from "react";
 import {
   ActivityIcon,
   BanIcon,
+  BypassIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CopyIcon,
+  DownloadIcon,
   PauseIcon,
   PlayIcon,
   SearchIcon,
@@ -12,14 +15,37 @@ import {
   SortNeutralIcon,
   TrashIcon,
 } from "../components/Icons";
-import { formatBytes, formatSpeed, formatTime, formatUptime } from "../lib/format";
+import { Select } from "../components/Select";
+import {
+  aggregateConnections,
+  buildPageNumbers,
+  connectionsToCsv,
+  defaultSortDir,
+  filterAndSortConnections,
+  isDomainBlockedByConfig,
+  isDomainDirectByConfig,
+  wildcardSuggestion,
+} from "../lib/connections";
+import { formatBytes, formatDuration, formatSpeed, formatTime, formatUptime } from "../lib/format";
 import { useI18n } from "../lib/i18n";
-import type { Config, ConnectionRecord, ConnectionState, DaemonStatus } from "../lib/types";
+import type {
+  Config,
+  ConnectionRecord,
+  ConnectionsViewState,
+  DaemonStatus,
+  SortKey,
+  StateFilter,
+  ThroughputPoint,
+} from "../lib/types";
 
 interface ConnectionsViewProps {
   status: DaemonStatus | null;
   config: Config | null;
   connections: ConnectionRecord[];
+  throughputHistory: ThroughputPoint[];
+  viewState: ConnectionsViewState;
+  onChangeViewState: Dispatch<SetStateAction<ConnectionsViewState>>;
+  searchInputRef: RefObject<HTMLInputElement | null>;
   paused: boolean;
   saving: boolean;
   onTogglePause: () => void;
@@ -27,103 +53,51 @@ interface ConnectionsViewProps {
   onStartEngine: () => void;
   onOpenDiagnostics: () => void;
   onBlockDomain: (pattern: string) => void;
+  onDirectDomain: (pattern: string) => void;
+  onUnblockDomain: (host: string) => void;
+  onNotify: (message: string) => void;
 }
-
-type StateFilter = "all" | "active" | "blocked";
-type SortKey =
-  | "time"
-  | "transfer"
-  | "tx"
-  | "rx"
-  | "process"
-  | "destination"
-  | "state"
-  | "proto";
-type SortDir = "asc" | "desc";
 
 const PAGE_SIZES = [25, 50, 100] as const;
 
-const STATE_RANK: Record<ConnectionState, number> = {
-  active: 3,
-  blocked: 2,
-  failed: 1,
-  closed: 0,
-};
+function Sparkline({ values }: { values: number[] }) {
+  const pts = useMemo(() => {
+    const series = values.length > 1 ? values : [0, 0];
+    const max = Math.max(1, ...series);
+    const w = 68;
+    const h = 22;
+    const pad = 2;
+    return series
+      .map((v, idx) => {
+        const x = (idx / Math.max(1, series.length - 1)) * w;
+        const y = h - pad - (v / max) * (h - pad * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  }, [values]);
 
-function defaultSortDir(key: SortKey): SortDir {
-  switch (key) {
-    case "process":
-    case "destination":
-    case "proto":
-      return "asc";
-    default:
-      return "desc";
-  }
-}
-
-function wildcardSuggestion(host: string): string | null {
-  const clean = host.trim().replace(/\.+$/, "").toLowerCase();
-  const labels = clean.split(".").filter(Boolean);
-  if (labels.length >= 3) {
-    return `*.${labels.slice(1).join(".")}`;
-  }
-  if (labels.length === 2) {
-    return `*.${clean}`;
-  }
-  return null;
-}
-
-function domainPatternMatches(patternRaw: string, hostRaw: string): boolean {
-  const pat = patternRaw.trim().replace(/\.+$/, "").toLowerCase();
-  const host = hostRaw.trim().replace(/\.+$/, "").toLowerCase();
-  if (!pat || !host) return false;
-  if (pat.startsWith("*.")) {
-    const suffix = pat.slice(2);
-    return host === suffix || host.endsWith(`.${suffix}`);
-  }
-  if (pat.startsWith(".")) {
-    const suffix = pat.slice(1);
-    return host === suffix || host.endsWith(`.${suffix}`);
-  }
-  if (pat.includes("*")) {
-    const escaped = pat
-      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*/g, ".*");
-    return new RegExp(`^${escaped}$`).test(host);
-  }
-  return host === pat;
-}
-
-function isDomainBlockedByConfig(config: Config | null, host: string | null): boolean {
-  if (!config || !host) return false;
-  return config.rules.some(
-    (r) =>
-      r.enabled &&
-      r.action === "block" &&
-      (r.domains ?? []).some((pat) => domainPatternMatches(pat, host))
+  return (
+    <svg className="sparkline-svg" viewBox="0 0 68 22" fill="none" aria-hidden="true">
+      <polyline
+        points={pts}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
-}
-
-function buildPageNumbers(current: number, total: number): Array<number | "ellipsis"> {
-  if (total <= 7) {
-    return Array.from({ length: total }, (_, i) => i + 1);
-  }
-  const pages: Array<number | "ellipsis"> = [1];
-  const left = Math.max(2, current - 1);
-  const right = Math.min(total - 1, current + 1);
-  if (left > 2) pages.push("ellipsis");
-  for (let p = left; p <= right; p += 1) {
-    pages.push(p);
-  }
-  if (right < total - 1) pages.push("ellipsis");
-  pages.push(total);
-  return pages;
 }
 
 export function ConnectionsView({
   status,
   config,
   connections,
+  throughputHistory,
+  viewState,
+  onChangeViewState,
+  searchInputRef,
   paused,
   saving,
   onTogglePause,
@@ -131,16 +105,27 @@ export function ConnectionsView({
   onStartEngine,
   onOpenDiagnostics,
   onBlockDomain,
+  onDirectDomain,
+  onUnblockDomain,
+  onNotify,
 }: ConnectionsViewProps) {
   const { t } = useI18n();
-  const [selectedProcess, setSelectedProcess] = useState<string>("all");
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<StateFilter>("all");
-  const [sortKey, setSortKey] = useState<SortKey>("time");
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [pageSize, setPageSize] = useState<number>(25);
-  const [page, setPage] = useState<number>(1);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const {
+    selectedProcess,
+    query,
+    filter,
+    sortKey,
+    sortDir,
+    pageSize,
+    page,
+    expandedId,
+    viewMode,
+    summaryGroup,
+  } = viewState;
+
+  const patchState = (partial: Partial<ConnectionsViewState>) => {
+    onChangeViewState((prev) => ({ ...prev, ...partial }));
+  };
 
   const processTabs = useMemo(() => {
     const map = new Map<string, { name: string; total: number; active: number }>();
@@ -169,71 +154,32 @@ export function ConnectionsView({
       selectedProcess !== "all" &&
       !processTabs.some((p) => p.name === selectedProcess)
     ) {
-      setSelectedProcess("all");
+      onChangeViewState((prev) => ({ ...prev, selectedProcess: "all", page: 1 }));
     }
-  }, [processTabs, selectedProcess]);
+  }, [processTabs, selectedProcess, onChangeViewState]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [selectedProcess, query, filter, sortKey, sortDir, pageSize]);
+  const filteredAndSorted = useMemo(
+    () =>
+      filterAndSortConnections(
+        connections,
+        selectedProcess,
+        query,
+        filter,
+        sortKey,
+        sortDir
+      ),
+    [connections, selectedProcess, query, filter, sortKey, sortDir]
+  );
 
-  const filteredAndSorted = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const list = connections.filter((c) => {
-      if (selectedProcess !== "all" && c.process_name !== selectedProcess) return false;
-      if (filter === "active" && c.state !== "active") return false;
-      if (filter === "blocked" && c.state !== "blocked" && c.state !== "failed") return false;
-      if (!q) return true;
-      return (
-        c.process_name.toLowerCase().includes(q) ||
-        (c.sniffed_host ?? "").toLowerCase().includes(q) ||
-        c.dst_ip.toLowerCase().includes(q) ||
-        String(c.dst_port).includes(q) ||
-        (c.proxy_name ?? "").toLowerCase().includes(q) ||
-        c.rule_name.toLowerCase().includes(q)
-      );
-    });
+  const summaryRows = useMemo(
+    () => aggregateConnections(filteredAndSorted, summaryGroup),
+    [filteredAndSorted, summaryGroup]
+  );
 
-    const dir = sortDir === "asc" ? 1 : -1;
-    list.sort((a, b) => {
-      let cmp = 0;
-      switch (sortKey) {
-        case "time":
-          cmp = a.started_at_ms - b.started_at_ms || a.id - b.id;
-          break;
-        case "transfer":
-          cmp = a.bytes_tx + a.bytes_rx - (b.bytes_tx + b.bytes_rx);
-          break;
-        case "tx":
-          cmp = a.bytes_tx - b.bytes_tx;
-          break;
-        case "rx":
-          cmp = a.bytes_rx - b.bytes_rx;
-          break;
-        case "process":
-          cmp = a.process_name.localeCompare(b.process_name);
-          break;
-        case "destination": {
-          const da = a.sniffed_host ?? a.dst_ip;
-          const db = b.sniffed_host ?? b.dst_ip;
-          cmp = da.localeCompare(db) || a.dst_port - b.dst_port;
-          break;
-        }
-        case "state":
-          cmp = STATE_RANK[a.state] - STATE_RANK[b.state];
-          break;
-        case "proto":
-          cmp = a.protocol.localeCompare(b.protocol);
-          break;
-      }
-      if (cmp === 0) {
-        return b.id - a.id;
-      }
-      return cmp * dir;
-    });
-
-    return list;
-  }, [connections, selectedProcess, query, filter, sortKey, sortDir]);
+  const maxSummaryTraffic = useMemo(
+    () => Math.max(1, ...summaryRows.map((r) => r.bytesTx + r.bytesRx)),
+    [summaryRows]
+  );
 
   const totalCount = filteredAndSorted.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
@@ -246,10 +192,9 @@ export function ConnectionsView({
 
   const handleHeaderSort = (key: SortKey) => {
     if (sortKey === key) {
-      setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+      patchState({ sortDir: sortDir === "asc" ? "desc" : "asc", page: 1 });
     } else {
-      setSortKey(key);
-      setSortDir(defaultSortDir(key));
+      patchState({ sortKey: key, sortDir: defaultSortDir(key), page: 1 });
     }
   };
 
@@ -260,10 +205,30 @@ export function ConnectionsView({
     return sortDir === "asc" ? <SortAscIcon size={12} /> : <SortDescIcon size={12} />;
   };
 
+  const copyText = (text: string) => {
+    void navigator.clipboard.writeText(text).then(() => {
+      onNotify(t("connections.copied"));
+    });
+  };
+
+  const handleExportCsv = () => {
+    if (filteredAndSorted.length === 0) return;
+    const csv = connectionsToCsv(filteredAndSorted);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `bypath-connections-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    onNotify(t("connections.exportedCsv", { count: filteredAndSorted.length }));
+  };
+
   const running = status?.engine_running ?? false;
   const stats = status?.stats;
   const dllLoaded = Boolean(status?.windivert_dll_path);
   const accessDenied =
+    status?.windivert_error_kind === "access_denied" ||
     (status?.windivert_error ?? "").toLowerCase().includes("access denied") ||
     (status?.windivert_error ?? "").includes("os error 5");
 
@@ -294,6 +259,9 @@ export function ConnectionsView({
     [connections]
   );
 
+  const txSeries = useMemo(() => throughputHistory.map((p) => p.tx), [throughputHistory]);
+  const rxSeries = useMemo(() => throughputHistory.map((p) => p.rx), [throughputHistory]);
+
   return (
     <div className="view-container">
       <div className="telemetry-strip" role="region" aria-label={t("connections.metricsAria")}>
@@ -319,7 +287,10 @@ export function ConnectionsView({
 
         <div className="telemetry-cell">
           <span className="telemetry-label">{t("connections.upload")}</span>
-          <span className="telemetry-value">{formatSpeed(stats?.tx_bytes_per_sec ?? 0)}</span>
+          <div className="telemetry-val-row">
+            <span className="telemetry-value">{formatSpeed(stats?.tx_bytes_per_sec ?? 0)}</span>
+            <Sparkline values={txSeries} />
+          </div>
           <span className="telemetry-sub">
             {t("connections.total", { size: formatBytes(stats?.total_bytes_tx ?? 0) })}
           </span>
@@ -327,7 +298,10 @@ export function ConnectionsView({
 
         <div className="telemetry-cell">
           <span className="telemetry-label">{t("connections.download")}</span>
-          <span className="telemetry-value">{formatSpeed(stats?.rx_bytes_per_sec ?? 0)}</span>
+          <div className="telemetry-val-row">
+            <span className="telemetry-value">{formatSpeed(stats?.rx_bytes_per_sec ?? 0)}</span>
+            <Sparkline values={rxSeries} />
+          </div>
           <span className="telemetry-sub">
             {t("connections.total", { size: formatBytes(stats?.total_bytes_rx ?? 0) })}
           </span>
@@ -345,7 +319,7 @@ export function ConnectionsView({
             role="tab"
             aria-selected={selectedProcess === "all"}
             className={`process-tab ${selectedProcess === "all" ? "active" : ""}`}
-            onClick={() => setSelectedProcess("all")}
+            onClick={() => patchState({ selectedProcess: "all", page: 1 })}
           >
             {totalActiveCount > 0 && <span className="dot dot-ok" aria-hidden="true" />}
             <span>{t("connections.allProcesses")}</span>
@@ -359,7 +333,7 @@ export function ConnectionsView({
               role="tab"
               aria-selected={selectedProcess === proc.name}
               className={`process-tab ${selectedProcess === proc.name ? "active" : ""}`}
-              onClick={() => setSelectedProcess(proc.name)}
+              onClick={() => patchState({ selectedProcess: proc.name, page: 1 })}
               title={proc.name}
             >
               <span
@@ -379,16 +353,38 @@ export function ConnectionsView({
             <SearchIcon size={14} />
           </span>
           <input
+            ref={searchInputRef}
             className="input"
             type="search"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => patchState({ query: e.target.value, page: 1 })}
             placeholder={t("connections.searchPlaceholder")}
             aria-label={t("connections.searchAria")}
           />
         </div>
 
         <div className="toolbar-group">
+          <div className="segmented" role="tablist" aria-label={t("connections.viewStreams")}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "streams"}
+              className={`segmented-btn ${viewMode === "streams" ? "active" : ""}`}
+              onClick={() => patchState({ viewMode: "streams" })}
+            >
+              {t("connections.viewStreams")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "summary"}
+              className={`segmented-btn ${viewMode === "summary" ? "active" : ""}`}
+              onClick={() => patchState({ viewMode: "summary" })}
+            >
+              {t("connections.viewSummary")}
+            </button>
+          </div>
+
           <div className="segmented" role="tablist" aria-label={t("connections.filterAria")}>
             {(["all", "active", "blocked"] as StateFilter[]).map((key) => (
               <button
@@ -397,7 +393,7 @@ export function ConnectionsView({
                 role="tab"
                 aria-selected={filter === key}
                 className={`segmented-btn ${filter === key ? "active" : ""}`}
-                onClick={() => setFilter(key)}
+                onClick={() => patchState({ filter: key, page: 1 })}
               >
                 {key === "all"
                   ? t("connections.filterAll")
@@ -408,36 +404,58 @@ export function ConnectionsView({
             ))}
           </div>
 
-          <div className="sort-control">
-            <select
-              className="select sort-select"
-              value={sortKey}
-              aria-label={t("connections.sortAria")}
-              onChange={(e) => {
-                const next = e.target.value as SortKey;
-                setSortKey(next);
-                setSortDir(defaultSortDir(next));
-              }}
-            >
-              <option value="time">{t("connections.sortTime")}</option>
-              <option value="transfer">{t("connections.sortTransfer")}</option>
-              <option value="tx">{t("connections.sortTx")}</option>
-              <option value="rx">{t("connections.sortRx")}</option>
-              <option value="process">{t("connections.sortProcess")}</option>
-              <option value="destination">{t("connections.sortDestination")}</option>
-              <option value="state">{t("connections.sortState")}</option>
-              <option value="proto">{t("connections.sortProto")}</option>
-            </select>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline sort-dir-btn"
-              aria-label={t("connections.sortDirectionAria")}
-              title={t("connections.sortDirectionAria")}
-              onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
-            >
-              {sortDir === "asc" ? <SortAscIcon size={13} /> : <SortDescIcon size={13} />}
-            </button>
-          </div>
+          {viewMode === "streams" ? (
+            <div className="sort-control">
+              <Select<SortKey>
+                size="sm"
+                value={sortKey}
+                ariaLabel={t("connections.sortAria")}
+                onChange={(next) =>
+                  patchState({ sortKey: next, sortDir: defaultSortDir(next), page: 1 })
+                }
+                options={[
+                  { value: "time", label: t("connections.sortTime") },
+                  { value: "transfer", label: t("connections.sortTransfer") },
+                  { value: "tx", label: t("connections.sortTx") },
+                  { value: "rx", label: t("connections.sortRx") },
+                  { value: "process", label: t("connections.sortProcess") },
+                  { value: "destination", label: t("connections.sortDestination") },
+                  { value: "state", label: t("connections.sortState") },
+                  { value: "proto", label: t("connections.sortProto") },
+                ]}
+              />
+              <button
+                type="button"
+                className="btn btn-sm btn-outline sort-dir-btn"
+                aria-label={t("connections.sortDirectionAria")}
+                title={t("connections.sortDirectionAria")}
+                onClick={() => patchState({ sortDir: sortDir === "asc" ? "desc" : "asc", page: 1 })}
+              >
+                {sortDir === "asc" ? <SortAscIcon size={13} /> : <SortDescIcon size={13} />}
+              </button>
+            </div>
+          ) : (
+            <div className="segmented" role="tablist" aria-label={t("connections.viewSummary")}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={summaryGroup === "process"}
+                className={`segmented-btn ${summaryGroup === "process" ? "active" : ""}`}
+                onClick={() => patchState({ summaryGroup: "process" })}
+              >
+                {t("connections.groupByProcess")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={summaryGroup === "domain"}
+                className={`segmented-btn ${summaryGroup === "domain" ? "active" : ""}`}
+                onClick={() => patchState({ summaryGroup: "domain" })}
+              >
+                {t("connections.groupByDomain")}
+              </button>
+            </div>
+          )}
 
           <button
             type="button"
@@ -446,6 +464,17 @@ export function ConnectionsView({
           >
             {paused ? <PlayIcon size={11} /> : <PauseIcon size={12} />}
             <span>{paused ? t("connections.resume") : t("connections.pause")}</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={handleExportCsv}
+            disabled={filteredAndSorted.length === 0}
+            title={t("connections.exportCsv")}
+          >
+            <DownloadIcon size={13} />
+            <span>{t("connections.exportCsv")}</span>
           </button>
 
           <button
@@ -496,12 +525,69 @@ export function ConnectionsView({
               </div>
             )}
           </div>
+        ) : viewMode === "summary" ? (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th style={{ width: "42%" }}>{t("connections.summaryColName")}</th>
+                <th style={{ width: "14%" }}>{t("connections.summaryColStreams")}</th>
+                <th style={{ width: "26%" }}>{t("connections.summaryColTraffic")}</th>
+                <th style={{ width: "18%" }}>{t("connections.summaryColStatus")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryRows.map((row) => {
+                const totalBytes = row.bytesTx + row.bytesRx;
+                const pct = Math.max(4, Math.round((totalBytes / maxSummaryTraffic) * 100));
+                const blocked = row.isDomain ? isDomainBlockedByConfig(config, row.key) : false;
+                return (
+                  <tr key={row.key}>
+                    <td>
+                      <div className={`cell-primary ${row.isDomain ? "mono" : ""}`} title={row.key}>
+                        {row.key}
+                      </div>
+                      <div className="summary-track">
+                        <div className="summary-fill" style={{ width: `${pct}%` }} />
+                      </div>
+                    </td>
+                    <td className="mono">{row.count}</td>
+                    <td className="mono">
+                      <div>{formatBytes(totalBytes)}</div>
+                      <div className="cell-secondary">
+                        TX {formatBytes(row.bytesTx)} / RX {formatBytes(row.bytesRx)}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="cell-secondary">
+                        {t("connections.summaryActiveBlocked", {
+                          active: row.active,
+                          blocked: row.blocked,
+                        })}
+                      </div>
+                      {row.isDomain && !blocked && (
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          style={{ height: 22, padding: "0 6px", marginTop: 4, fontSize: 11.5 }}
+                          disabled={saving}
+                          onClick={() => onBlockDomain(row.key)}
+                        >
+                          <BanIcon size={11} />
+                          <span>{t("connections.stateBlocked")}</span>
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         ) : (
           <>
             <table className="data-table">
               <thead>
                 <tr>
-                  <th style={{ width: "20%" }}>
+                  <th style={{ width: "22%" }}>
                     <button
                       type="button"
                       className={`th-sort-btn ${sortKey === "process" ? "active" : ""}`}
@@ -511,7 +597,7 @@ export function ConnectionsView({
                       {renderSortIcon("process")}
                     </button>
                   </th>
-                  <th style={{ width: "35%" }}>
+                  <th style={{ width: "33%" }}>
                     <button
                       type="button"
                       className={`th-sort-btn ${sortKey === "destination" ? "active" : ""}`}
@@ -568,22 +654,26 @@ export function ConnectionsView({
                         ? "dot-err"
                         : "dot-idle";
                   const hostBlocked = isDomainBlockedByConfig(config, conn.sniffed_host);
+                  const hostDirect = isDomainDirectByConfig(config, conn.sniffed_host);
                   const wildcardPat = conn.sniffed_host
                     ? wildcardSuggestion(conn.sniffed_host)
                     : null;
+                  const targetDisplay = conn.sniffed_host
+                    ? `${conn.sniffed_host}:${conn.dst_port}`
+                    : `${conn.dst_ip}:${conn.dst_port}`;
 
                   return (
                     <Fragment key={conn.id}>
                       <tr
                         className={`clickable ${isExpanded ? "selected-row" : ""}`}
-                        onClick={() => setExpandedId(isExpanded ? null : conn.id)}
+                        onClick={() => patchState({ expandedId: isExpanded ? null : conn.id })}
                       >
                         <td>
                           <div className="cell-primary" title={conn.process_name}>
                             {conn.process_name}
                           </div>
                           <div className="cell-secondary mono">
-                            {conn.pid ? `PID ${conn.pid}` : t("connections.unknownPid")} ·{" "}
+                            {conn.pid ? `PID ${conn.pid}` : t("connections.unknownPid")} /{" "}
                             {formatTime(conn.started_at_ms)}
                           </div>
                         </td>
@@ -591,11 +681,7 @@ export function ConnectionsView({
                           <div
                             className="cell-primary mono"
                             style={{ display: "flex", alignItems: "center", gap: 6 }}
-                            title={
-                              conn.sniffed_host
-                                ? `${conn.sniffed_host}:${conn.dst_port}`
-                                : `${conn.dst_ip}:${conn.dst_port}`
-                            }
+                            title={targetDisplay}
                           >
                             <span
                               style={{
@@ -604,9 +690,7 @@ export function ConnectionsView({
                                 whiteSpace: "nowrap",
                               }}
                             >
-                              {conn.sniffed_host
-                                ? `${conn.sniffed_host}:${conn.dst_port}`
-                                : `${conn.dst_ip}:${conn.dst_port}`}
+                              {targetDisplay}
                             </span>
                             {conn.sniff_kind && (
                               <span className="tag tag-mono">{conn.sniff_kind}</span>
@@ -671,62 +755,130 @@ export function ConnectionsView({
                               </div>
                               <div>
                                 <div className="detail-item-label">
-                                  {t("connections.detailRule")}
+                                  {t("connections.detailRule")} / {t("connections.detailDuration")}
                                 </div>
-                                <div className="detail-item-value">{conn.rule_name}</div>
+                                <div className="detail-item-value">
+                                  {conn.rule_name} ({formatDuration(conn.started_at_ms, conn.ended_at_ms)})
+                                </div>
                               </div>
-                              {conn.sniffed_host && (
-                                <div style={{ gridColumn: "1 / -1" }}>
-                                  <div className="detail-item-label">
-                                    {t("connections.detailQuickActions")}
-                                  </div>
-                                  <div className="detail-actions">
-                                    {hostBlocked ? (
-                                      <span className="tag">
-                                        <span className="dot dot-err" aria-hidden="true" />
-                                        <span>{t("connections.domainAlreadyBlocked")}</span>
-                                      </span>
-                                    ) : (
-                                      <>
+
+                              <div style={{ gridColumn: "1 / -1" }}>
+                                <div className="detail-item-label">
+                                  {t("connections.detailQuickActions")}
+                                </div>
+                                <div className="detail-actions">
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm btn-outline"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      copyText(conn.sniffed_host ?? `${conn.dst_ip}:${conn.dst_port}`);
+                                    }}
+                                  >
+                                    <CopyIcon size={12} />
+                                    <span>{t("connections.copyTarget")}</span>
+                                  </button>
+
+                                  {conn.exe_path && (
+                                    <button
+                                      type="button"
+                                      className="btn btn-sm btn-ghost"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        copyText(conn.exe_path!);
+                                      }}
+                                    >
+                                      <CopyIcon size={12} />
+                                      <span>{t("connections.copyPath")}</span>
+                                    </button>
+                                  )}
+
+                                  {conn.sniffed_host && (
+                                    <>
+                                      {hostDirect ? (
+                                        <span className="tag">
+                                          <span className="dot dot-ok" aria-hidden="true" />
+                                          <span>{t("connections.domainAlreadyDirect")}</span>
+                                        </span>
+                                      ) : (
                                         <button
                                           type="button"
                                           className="btn btn-sm btn-outline"
                                           disabled={saving}
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            onBlockDomain(conn.sniffed_host!);
+                                            onDirectDomain(conn.sniffed_host!);
                                           }}
                                         >
-                                          <BanIcon size={12} />
+                                          <BypassIcon size={12} />
                                           <span className="mono">
-                                            {t("connections.blockExactDomain", {
+                                            {t("connections.directDomain", {
                                               domain: conn.sniffed_host,
                                             })}
                                           </span>
                                         </button>
-                                        {wildcardPat && wildcardPat !== conn.sniffed_host && (
+                                      )}
+
+                                      {hostBlocked ? (
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-outline"
+                                          disabled={saving}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            onUnblockDomain(conn.sniffed_host!);
+                                          }}
+                                        >
+                                          <span className="dot dot-err" aria-hidden="true" />
+                                          <span className="mono">
+                                            {t("connections.unblockDomain", {
+                                              domain: conn.sniffed_host,
+                                            })}
+                                          </span>
+                                        </button>
+                                      ) : (
+                                        <>
                                           <button
                                             type="button"
-                                            className="btn btn-sm btn-ghost"
+                                            className="btn btn-sm btn-outline"
                                             disabled={saving}
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              onBlockDomain(wildcardPat);
+                                              onBlockDomain(conn.sniffed_host!);
                                             }}
                                           >
                                             <BanIcon size={12} />
                                             <span className="mono">
-                                              {t("connections.blockWildcardDomain", {
-                                                pattern: wildcardPat,
+                                              {t("connections.blockExactDomain", {
+                                                domain: conn.sniffed_host,
                                               })}
                                             </span>
                                           </button>
-                                        )}
-                                      </>
-                                    )}
-                                  </div>
+                                          {wildcardPat && wildcardPat !== conn.sniffed_host && (
+                                            <button
+                                              type="button"
+                                              className="btn btn-sm btn-ghost"
+                                              disabled={saving}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                onBlockDomain(wildcardPat);
+                                              }}
+                                            >
+                                              <BanIcon size={12} />
+                                              <span className="mono">
+                                                {t("connections.blockWildcardDomain", {
+                                                  pattern: wildcardPat,
+                                                })}
+                                              </span>
+                                            </button>
+                                          )}
+                                        </>
+                                      )}
+                                    </>
+                                  )}
                                 </div>
-                              )}
+                              </div>
+
                               {conn.error && (
                                 <div style={{ gridColumn: "1 / -1" }}>
                                   <div className="detail-item-label">
@@ -759,18 +911,16 @@ export function ConnectionsView({
                     total: totalCount,
                   })}
                 </span>
-                <select
-                  className="select pagination-size-select"
-                  value={pageSize}
-                  aria-label={t("connections.pageSizeAria")}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                >
-                  {PAGE_SIZES.map((sz) => (
-                    <option key={sz} value={sz}>
-                      {t("connections.perPage", { count: sz })}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  size="xs"
+                  value={String(pageSize)}
+                  ariaLabel={t("connections.pageSizeAria")}
+                  onChange={(val) => patchState({ pageSize: Number(val), page: 1 })}
+                  options={PAGE_SIZES.map((sz) => ({
+                    value: String(sz),
+                    label: t("connections.perPage", { count: sz }),
+                  }))}
+                />
               </div>
 
               {totalPages > 1 && (
@@ -780,7 +930,7 @@ export function ConnectionsView({
                     className="page-btn"
                     disabled={safePage <= 1}
                     aria-label={t("connections.prevPage")}
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    onClick={() => patchState({ page: Math.max(1, safePage - 1) })}
                   >
                     <ChevronLeftIcon size={13} />
                   </button>
@@ -796,7 +946,7 @@ export function ConnectionsView({
                         type="button"
                         className={`page-btn ${item === safePage ? "active" : ""}`}
                         aria-current={item === safePage ? "page" : undefined}
-                        onClick={() => setPage(item)}
+                        onClick={() => patchState({ page: item })}
                       >
                         {item}
                       </button>
@@ -808,7 +958,7 @@ export function ConnectionsView({
                     className="page-btn"
                     disabled={safePage >= totalPages}
                     aria-label={t("connections.nextPage")}
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    onClick={() => patchState({ page: Math.min(totalPages, safePage + 1) })}
                   >
                     <ChevronRightIcon size={13} />
                   </button>

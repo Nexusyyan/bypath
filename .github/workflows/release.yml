@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release version label for manual build (e.g. v0.3.0)"
+        description: "Release version label for manual build (e.g. v0.4.0)"
         required: false
         default: "dev"
 
@@ -55,6 +55,12 @@ jobs:
             . -> target
             apps/desktop/src-tauri -> target
 
+      - name: Fetch and verify official signed WinDivert 2.2.2-A runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\scripts\fetch-windivert.ps1
+
       - name: Run workspace test suite
         run: cargo test --workspace
 
@@ -64,34 +70,58 @@ jobs:
       - name: Build Desktop GUI (Tauri v2)
         run: |
           npm --prefix apps/desktop ci
+          npm --prefix apps/desktop test
           npm --prefix apps/desktop run tauri:build
 
-      - name: Stage portable bundle and checksums
+      - name: Stage out-of-the-box and no-driver bundles with checksums
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $tag = "${{ steps.meta.outputs.tag }}"
           $distDir = "dist-release"
-          $stageDir = Join-Path $distDir "bypath-$tag-windows-x64"
-          $scriptsDir = Join-Path $stageDir "scripts"
+          $fullStage = Join-Path $distDir "bypath-$tag-windows-x64"
+          $liteStage = Join-Path $distDir "bypath-$tag-windows-x64-nodriver"
 
-          New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
+          foreach ($stage in @($fullStage, $liteStage)) {
+            $skillsDir = Join-Path $stage "skills\bypath-agent"
+            New-Item -ItemType Directory -Force -Path $skillsDir | Out-Null
 
-          Copy-Item "target\release\bypath.exe" $stageDir
-          Copy-Item "target\release\bypath-daemon.exe" $stageDir
-          Copy-Item "apps\desktop\src-tauri\target\release\bypath-gui.exe" $stageDir
-          Copy-Item "config.example.toml" $stageDir
-          Copy-Item "README.md" $stageDir
-          Copy-Item "README.zh-CN.md" $stageDir
-          Copy-Item "LICENSE-MIT" $stageDir
-          Copy-Item "LICENSE-APACHE" $stageDir
-          Copy-Item "THIRD_PARTY_NOTICES.md" $stageDir
-          Copy-Item "scripts\fetch-windivert.ps1" $scriptsDir
+            Copy-Item "target\release\bypath.exe" $stage
+            Copy-Item "target\release\bypath-daemon.exe" $stage
+            Copy-Item "apps\desktop\src-tauri\target\release\bypath-gui.exe" $stage
+            Copy-Item "config.example.toml" $stage
+            Copy-Item "README.md" $stage
+            Copy-Item "README.zh-CN.md" $stage
+            Copy-Item "LICENSE-MIT" $stage
+            Copy-Item "LICENSE-APACHE" $stage
+            Copy-Item "THIRD_PARTY_NOTICES.md" $stage
+            Copy-Item "skills\bypath-agent\SKILL.md" $skillsDir
+          }
 
-          $zipPath = Join-Path $distDir "bypath-$tag-windows-x64.zip"
-          Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -Force
+          # Full out-of-the-box bundle: include ONLY official signed WinDivert.dll + WinDivert64.sys
+          # and full LGPLv3/GPLv3 license texts (zero sample tools).
+          $wdStage = Join-Path $fullStage "runtime\windivert"
+          New-Item -ItemType Directory -Force -Path $wdStage | Out-Null
+          Copy-Item "runtime\windivert\WinDivert.dll" $wdStage
+          Copy-Item "runtime\windivert\WinDivert64.sys" $wdStage
+          foreach ($doc in @("WINDIVERT_LICENSE.txt", "WINDIVERT_README.txt")) {
+            $src = Join-Path "runtime\windivert" $doc
+            if (Test-Path $src) {
+              Copy-Item $src $wdStage
+            }
+          }
 
-          # Also expose standalone executables for direct download
+          # Clean no-driver bundle: includes fetch script for restricted AV environments.
+          $liteScripts = Join-Path $liteStage "scripts"
+          New-Item -ItemType Directory -Force -Path $liteScripts | Out-Null
+          Copy-Item "scripts\fetch-windivert.ps1" $liteScripts
+
+          $fullZip = Join-Path $distDir "bypath-$tag-windows-x64.zip"
+          $liteZip = Join-Path $distDir "bypath-$tag-windows-x64-nodriver.zip"
+          Compress-Archive -Path "$fullStage\*" -DestinationPath $fullZip -Force
+          Compress-Archive -Path "$liteStage\*" -DestinationPath $liteZip -Force
+
+          # Expose standalone executables for power users and CLI upgrades
           Copy-Item "target\release\bypath.exe" (Join-Path $distDir "bypath-$tag-windows-x64.exe")
           Copy-Item "target\release\bypath-daemon.exe" (Join-Path $distDir "bypath-daemon-$tag-windows-x64.exe")
           Copy-Item "apps\desktop\src-tauri\target\release\bypath-gui.exe" (Join-Path $distDir "bypath-gui-$tag-windows-x64.exe")
@@ -128,10 +158,15 @@ jobs:
           body: |
             ## Bypath ${{ steps.meta.outputs.tag }} (Windows x64)
 
-            ### Quick Start
-            1. Extract `bypath-${{ steps.meta.outputs.tag }}-windows-x64.zip`.
-            2. Run `.\scripts\fetch-windivert.ps1` once to download and verify the official signed WinDivert 2.2.2-A runtime (`WinDivert.dll` + `WinDivert64.sys`, LGPLv3).
-            3. Install the background Windows Service once (`.\bypath.exe service install && .\bypath.exe service start`, or via **Diagnostics -> Install & Start Service** inside `bypath-gui.exe`).
-            4. Launch `bypath-gui.exe` as a standard user.
+            ### Quick Start (Recommended Out-of-the-Box Bundle)
+            1. Download and extract **`bypath-${{ steps.meta.outputs.tag }}-windows-x64.zip`** (includes official SHA-256 & Authenticode verified `WinDivert.dll` + `WinDivert64.sys` under `runtime/windivert/` with full LGPLv3 notices).
+            2. Double-click **`bypath-gui.exe`**.
+            3. Edit your upstream proxy address if needed (e.g. `127.0.0.1:7897` or `127.0.0.1:10808`), click **Authorize & Start Service** once, toggle your apps (such as Antigravity), and click **Start Proxying**.
 
-            > **Integrity**: Verify downloads against `SHA256SUMS.txt`. WinDivert binaries are intentionally fetched directly from the official release with SHA-256 and Authenticode verification to keep LGPLv3 compliance clean and avoid false-positive AV quarantines on the release bundle.
+            ### Clean No-Driver Bundle
+            If your antivirus flags kernel packet drivers in ZIP archives, download **`bypath-${{ steps.meta.outputs.tag }}-windows-x64-nodriver.zip`** and run `.\scripts\fetch-windivert.ps1` (or locate your own `WinDivert.dll` + `WinDivert64.sys` from Diagnostics).
+
+            ### AI Agent / DIY Automation
+            Connect Antigravity, Claude Code, or Cursor to `bypath.exe mcp` (built-in stdio MCP server) or call `bypath.exe ctl --json ...`. See `skills/bypath-agent/SKILL.md` inside the archive.
+
+            > **Integrity**: Verify all downloads against `SHA256SUMS.txt`.

@@ -57,6 +57,56 @@ pub async fn connect_tcp(proxy: &ProxyConfig, target: &TargetAddr) -> Result<Tcp
     Ok(stream)
 }
 
+/// Probes an HTTP proxy endpoint over an already-connected stream by sending a minimal
+/// request and checking for a valid HTTP status line while flagging 407 auth failures.
+pub async fn probe_handshake_stream(stream: &mut TcpStream, proxy: &ProxyConfig) -> Result<()> {
+    let _ = stream.set_nodelay(true);
+
+    let mut req = String::from(
+        "OPTIONS http://bypath.probe.invalid/ HTTP/1.1\r\nHost: bypath.probe.invalid\r\nConnection: close\r\n",
+    );
+    if let Some(ref user) = proxy.username {
+        let pass = proxy.password.as_deref().unwrap_or_default();
+        let encoded = base64_encode(format!("{user}:{pass}").as_bytes());
+        req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+    }
+    req.push_str("\r\n");
+
+    stream.write_all(req.as_bytes()).await?;
+
+    let mut buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    while buf.len() < 4096 {
+        match stream.read_exact(&mut byte).await {
+            Ok(_) => {
+                buf.push(byte[0]);
+                if buf.ends_with(b"\r\n") || buf.ends_with(b"\n") {
+                    break;
+                }
+            }
+            Err(_) if !buf.is_empty() => break,
+            Err(err) => return Err(err).context("HTTP proxy closed connection before response"),
+        }
+    }
+
+    let status_line = std::str::from_utf8(&buf)
+        .context("endpoint returned non-HTTP binary data")?
+        .trim();
+    if !status_line.starts_with("HTTP/") {
+        bail!("endpoint did not speak HTTP proxy protocol");
+    }
+
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    if status_code == 407 {
+        bail!("HTTP proxy authentication failed (407 Proxy Authentication Required)");
+    }
+    Ok(())
+}
+
 fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);

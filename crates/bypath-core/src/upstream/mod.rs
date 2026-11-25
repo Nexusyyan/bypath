@@ -1,6 +1,7 @@
 pub mod http;
 pub mod probe;
 pub mod socks5;
+pub mod system_proxy;
 
 use crate::config::{ProxyConfig, ProxyKind};
 use anyhow::Result;

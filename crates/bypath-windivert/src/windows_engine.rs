@@ -29,6 +29,32 @@ pub struct WinDivertProbeReport {
     pub driver_opened: bool,
     pub driver_version: Option<(u64, u64)>,
     pub error: Option<String>,
+    pub error_kind: Option<String>,
+}
+
+fn classify_windivert_error(dll_loaded: bool, msg: &str) -> String {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("winDivert64.sys".to_ascii_lowercase().as_str())
+        && (lower.contains("missing") || lower.contains("not found") || lower.contains("os error 2"))
+    {
+        return "missing_sys".to_string();
+    }
+    if !dll_loaded && lower.contains("windivert.dll not found") {
+        return "missing_dll".to_string();
+    }
+    if lower.contains("os error 5") || lower.contains("access denied") {
+        return "access_denied".to_string();
+    }
+    if lower.contains("os error 1275") || lower.contains("hvci") || lower.contains("antivirus") {
+        return "blocked_by_security".to_string();
+    }
+    if lower.contains("os error 577") || lower.contains("signature") {
+        return "invalid_signature".to_string();
+    }
+    if lower.contains("os error 2") {
+        return "missing_sys".to_string();
+    }
+    "other".to_string()
 }
 
 /// Probes `WinDivert.dll` loading and verifies that `WinDivert64.sys` opens cleanly
@@ -37,12 +63,15 @@ pub fn probe_windivert(windivert_dir: Option<&Path>) -> WinDivertProbeReport {
     let lib = match WinDivertLib::load(windivert_dir) {
         Ok(l) => l,
         Err(err) => {
+            let msg = err.to_string();
+            let kind = classify_windivert_error(false, &msg);
             return WinDivertProbeReport {
                 dll_loaded: false,
                 dll_path: None,
                 driver_opened: false,
                 driver_version: None,
-                error: Some(err.to_string()),
+                error: Some(msg),
+                error_kind: Some(kind),
             };
         }
     };
@@ -65,15 +94,21 @@ pub fn probe_windivert(windivert_dir: Option<&Path>) -> WinDivertProbeReport {
                 driver_opened: true,
                 driver_version: version,
                 error: None,
+                error_kind: None,
             }
         }
-        Err(err) => WinDivertProbeReport {
-            dll_loaded: true,
-            dll_path,
-            driver_opened: false,
-            driver_version: None,
-            error: Some(err.to_string()),
-        },
+        Err(err) => {
+            let msg = err.to_string();
+            let kind = classify_windivert_error(true, &msg);
+            WinDivertProbeReport {
+                dll_loaded: true,
+                dll_path,
+                driver_opened: false,
+                driver_version: None,
+                error: Some(msg),
+                error_kind: Some(kind),
+            }
+        }
     }
 }
 

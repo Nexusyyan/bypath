@@ -266,7 +266,24 @@ mod win_impl {
 
         rt.block_on(async {
             let controller = DaemonController::new(config_path, BackendMode::Service)?;
-            if autostart_engine {
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+                |_| {
+                    tracing_subscriber::EnvFilter::new(
+                        "bypath_core=info,bypath_windivert=info,bypath_ipc=info,bypath_daemon=info,info",
+                    )
+                },
+            );
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer().with_target(false).compact())
+                .with(controller.telemetry().log_layer())
+                .try_init();
+
+            let should_autostart =
+                autostart_engine || controller.current_config().general.auto_start_engine;
+            if should_autostart {
                 if let Err(err) = controller.start_engine().await {
                     error!(error = %err, "autostart engine failed during service startup");
                 }

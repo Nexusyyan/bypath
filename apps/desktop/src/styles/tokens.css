@@ -1,10 +1,13 @@
 :root {
+  color-scheme: light;
+
   /* Core neutral surface hierarchy (zero cool-blue cast) */
   --surface-canvas: #FFFFFF;
   --surface-sidebar: #F9F9FA;
   --surface-subtle: #F7F7F9;
   --surface-hover: #F2F2F5;
   --surface-active: #EAEAEF;
+  --surface-active-hover: #DFDFE6;
   --surface-chip: #F3F3F6;
 
   /* Restrained ink hierarchy (pure #000000 prohibited) */
@@ -14,11 +17,18 @@
   --ink-secondary: #6E6E77;
   --ink-on-dark: #FFFFFF;
 
+  /* Controls & scrollbars */
+  --switch-track: #DCDCE2;
+  --switch-thumb: #FFFFFF;
+  --scrollbar-thumb: rgba(26, 26, 29, 0.14);
+  --scrollbar-thumb-hover: rgba(26, 26, 29, 0.26);
+
   /* Hairline dividers and control outlines */
   --line-hairline: rgba(0, 0, 0, 0.06);
   --line-control: rgba(0, 0, 0, 0.10);
   --line-control-hover: rgba(0, 0, 0, 0.18);
   --line-focus: rgba(26, 26, 29, 0.34);
+  --shadow-popover: 0 10px 28px rgba(26, 26, 29, 0.08), 0 2px 6px rgba(26, 26, 29, 0.04);
 
   /* Minimal semantic indicators (dots and compact inline text only) */
   --status-ok: #27794B;
@@ -57,4 +67,42 @@
   /* Layout metrics */
   --sidebar-width: 228px;
   --topbar-height: 48px;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Pure charcoal neutral hierarchy (zero blue cast, zero pure #000000) */
+  --surface-canvas: #161618;
+  --surface-sidebar: #111113;
+  --surface-subtle: #1C1C1F;
+  --surface-hover: #222226;
+  --surface-active: #2A2A30;
+  --surface-active-hover: #33333A;
+  --surface-chip: #232328;
+
+  --ink-primary: #F4F4F5;
+  --ink-primary-hover: #E2E2E6;
+  --ink-medium: #C8C8D0;
+  --ink-secondary: #8E8E98;
+  --ink-on-dark: #161618;
+
+  --switch-track: #35353D;
+  --switch-thumb: #161618;
+  --scrollbar-thumb: rgba(244, 244, 245, 0.16);
+  --scrollbar-thumb-hover: rgba(244, 244, 245, 0.28);
+
+  --line-hairline: rgba(255, 255, 255, 0.07);
+  --line-control: rgba(255, 255, 255, 0.12);
+  --line-control-hover: rgba(255, 255, 255, 0.22);
+  --line-focus: rgba(244, 244, 245, 0.40);
+  --shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.24);
+
+  --status-ok: #3DA86C;
+  --status-ok-bg: rgba(61, 168, 108, 0.14);
+  --status-warn: #D4943A;
+  --status-warn-bg: rgba(212, 148, 58, 0.14);
+  --status-err: #E05858;
+  --status-err-bg: rgba(224, 88, 88, 0.14);
+  --status-idle: #71717A;
 }

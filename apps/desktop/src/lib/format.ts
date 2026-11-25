@@ -28,3 +28,15 @@ export function formatTime(tsMs: number): string {
   const d = new Date(tsMs);
   return d.toLocaleTimeString("en-GB", { hour12: false });
 }
+
+export function formatDuration(startedAtMs: number, endedAtMs: number | null): string {
+  if (!startedAtMs) return "-";
+  const end = endedAtMs ?? Date.now();
+  const diffMs = Math.max(0, end - startedAtMs);
+  if (diffMs < 1000) return `${diffMs} ms`;
+  const secs = diffMs / 1000;
+  if (secs < 60) return `${secs.toFixed(1)} s`;
+  const mins = Math.floor(secs / 60);
+  const rem = Math.floor(secs % 60);
+  return `${mins}m ${rem}s`;
+}

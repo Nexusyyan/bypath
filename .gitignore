@@ -1,6 +1,8 @@
 /target
 /runtime/
 /dist-release/
+/bypath-data/
+portable.json
 apps/desktop/node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/

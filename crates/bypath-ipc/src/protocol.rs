@@ -1,6 +1,8 @@
 use bypath_core::config::{Config, PresetInfo, ProxyConfig};
-use bypath_core::telemetry::{ConnectionRecord, EngineStats};
+use bypath_core::rules::{RuleTestQuery, RuleTestReport};
+use bypath_core::telemetry::{ConnectionRecord, EngineStats, LogEntry};
 use bypath_core::upstream::probe::ProxyProbeReport;
+use bypath_core::upstream::system_proxy::SystemProxyInfo;
 use serde::{Deserialize, Serialize};
 
 /// Default Windows Named Pipe endpoint shared between the background service, CLI, and GUI.
@@ -25,6 +27,10 @@ pub struct DaemonStatus {
     pub windivert_dll_path: Option<String>,
     pub windivert_version: Option<String>,
     pub windivert_error: Option<String>,
+    #[serde(default)]
+    pub windivert_error_kind: Option<String>,
+    #[serde(default)]
+    pub portable_mode: bool,
     pub config_path: String,
     pub active_rules_count: usize,
     pub total_rules_count: usize,
@@ -63,6 +69,8 @@ pub struct DoctorReport {
     pub windivert_driver_opened: bool,
     pub windivert_version: Option<String>,
     pub windivert_error: Option<String>,
+    #[serde(default)]
+    pub windivert_error_kind: Option<String>,
     pub proxies: Vec<NamedProxyProbe>,
 }
 
@@ -89,6 +97,16 @@ pub enum IpcRequest {
         proxy: ProxyConfig,
     },
     ListPresets,
+    GetSystemProxy,
+    TestRule {
+        query: RuleTestQuery,
+    },
+    GetLogs {
+        #[serde(default)]
+        min_level: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     SubscribeEvents,
 }
 
@@ -108,6 +126,9 @@ pub enum IpcResponse {
     Doctor { report: DoctorReport },
     ProxyProbe { probe: NamedProxyProbe },
     Presets { presets: Vec<PresetInfo> },
+    SystemProxy { info: SystemProxyInfo },
+    RuleTest { report: RuleTestReport },
+    Logs { entries: Vec<LogEntry> },
     Subscribed,
     Error { message: String },
 }
@@ -128,14 +149,28 @@ mod tests {
             IpcRequest::ListProcesses { filter: Some(ref f) } if f == "antigravity"
         ));
 
+        let test_req = IpcRequest::TestRule {
+            query: RuleTestQuery {
+                process_name: Some("Antigravity.exe".into()),
+                exe_path: None,
+                host: Some("play.googleapis.com".into()),
+                dst_ip: None,
+                dst_port: 443,
+                protocol: "tcp".into(),
+            },
+        };
+        let enc_test = serde_json::to_string(&test_req).unwrap();
+        let dec_test: IpcRequest = serde_json::from_str(&enc_test).unwrap();
+        assert!(matches!(dec_test, IpcRequest::TestRule { .. }));
+
         let resp = IpcResponse::Pong {
-            version: "0.2.0".into(),
+            version: "0.4.0".into(),
         };
         let encoded_resp = serde_json::to_string(&resp).unwrap();
         let decoded_resp: IpcResponse = serde_json::from_str(&encoded_resp).unwrap();
         assert!(matches!(
             decoded_resp,
-            IpcResponse::Pong { ref version } if version == "0.2.0"
+            IpcResponse::Pong { ref version } if version == "0.4.0"
         ));
     }
 }

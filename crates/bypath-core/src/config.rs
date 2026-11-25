@@ -26,6 +26,18 @@ pub struct GeneralConfig {
     pub bypass_lan: bool,
     #[serde(default = "default_windivert_dir")]
     pub windivert_dir: String,
+    /// When enabled, closing the desktop window hides it to the system tray instead of exiting.
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+    /// When enabled, BypathService automatically starts packet interception on service startup.
+    #[serde(default)]
+    pub auto_start_engine: bool,
+    /// UI theme preference: `"system"`, `"light"`, or `"dark"`.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// When enabled, the desktop app silently checks GitHub Releases on startup (throttled).
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 impl Default for GeneralConfig {
@@ -36,6 +48,10 @@ impl Default for GeneralConfig {
             block_quic_when_no_udp: true,
             bypass_lan: true,
             windivert_dir: default_windivert_dir(),
+            minimize_to_tray: true,
+            auto_start_engine: false,
+            theme: default_theme(),
+            auto_check_updates: true,
         }
     }
 }
@@ -50,6 +66,10 @@ fn default_true() -> bool {
 
 fn default_windivert_dir() -> String {
     "runtime/windivert".to_string()
+}
+
+fn default_theme() -> String {
+    "system".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,37 +350,80 @@ pub fn list_builtin_presets() -> Vec<PresetInfo> {
     ]
 }
 
-/// Returns the default persistent config path shared by the Windows Service, CLI, and GUI.
-pub fn default_config_path() -> PathBuf {
+/// Returns `true` when portable mode is active (a `portable.json` marker or `./bypath-data`
+/// folder exists next to the current executable).
+pub fn is_portable_mode() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let marker = dir.join("portable.json");
+    if marker.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&marker) {
+            if raw.contains("false") && !raw.contains("true") {
+                return false;
+            }
+        }
+        return true;
+    }
+    dir.join("bypath-data").is_dir()
+}
+
+/// Resolves the persistent data directory (`./bypath-data` in portable mode, or `%ProgramData%\Bypath`).
+pub fn resolve_data_dir() -> PathBuf {
+    if is_portable_mode() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                return dir.join("bypath-data");
+            }
+        }
+    }
     #[cfg(windows)]
     {
         if let Ok(program_data) = std::env::var("ProgramData") {
-            return PathBuf::from(program_data)
-                .join("Bypath")
-                .join("config.toml");
+            return PathBuf::from(program_data).join("Bypath");
         }
     }
-    PathBuf::from("config.toml")
+    PathBuf::from(".")
+}
+
+/// Returns the default persistent config path shared by the Windows Service, CLI, and GUI.
+pub fn default_config_path() -> PathBuf {
+    resolve_data_dir().join("config.toml")
+}
+
+/// Returns the default rolling log file path used by the background service and daemon.
+pub fn default_log_path() -> PathBuf {
+    resolve_data_dir().join("logs").join("bypath.log")
 }
 
 /// Resolves the most likely directory containing `WinDivert.dll` and `WinDivert64.sys`.
 pub fn resolve_windivert_dir(configured: Option<&str>) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(c) = configured {
-        if !c.trim().is_empty() {
+    let trimmed = configured.map(str::trim).filter(|s| !s.is_empty());
+    let is_default_rel = matches!(trimmed, Some("runtime/windivert") | Some(r"runtime\windivert"));
+
+    if let Some(c) = trimmed {
+        if !is_default_rel {
             candidates.push(PathBuf::from(c));
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // Check bundled release path `<exe_dir>/runtime/windivert` BEFORE relative paths
+            // so Windows Services (whose CWD is C:\Windows\System32) always find bundled drivers.
             candidates.push(dir.join("runtime").join("windivert"));
             candidates.push(dir.to_path_buf());
+            candidates.push(dir.join("windivert"));
             // Walk up from target/release or apps/desktop/src-tauri/target/release during dev
             for ancestor in dir.ancestors().skip(1).take(8) {
                 candidates.push(ancestor.join("runtime").join("windivert"));
             }
         }
     }
+    candidates.push(resolve_data_dir().join("windivert"));
     candidates.push(PathBuf::from("runtime").join("windivert"));
     #[cfg(windows)]
     if let Ok(program_data) = std::env::var("ProgramData") {

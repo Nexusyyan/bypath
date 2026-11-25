@@ -61,20 +61,46 @@ unsafe impl Send for WinDivertLib {}
 unsafe impl Sync for WinDivertLib {}
 
 impl WinDivertLib {
-    /// Searches for `WinDivert.dll` in `preferred_dir`, alongside the current executable,
-    /// and in `runtime/windivert`, then dynamically loads its exported C symbols.
+    /// Searches for `WinDivert.dll` in `preferred_dir`, `<exe_dir>/runtime/windivert`,
+    /// alongside the current executable, parent workspace roots, and ProgramData, then
+    /// dynamically loads its exported C symbols.
     pub fn load(preferred_dir: Option<&Path>) -> Result<Arc<Self>> {
         let mut candidates: Vec<PathBuf> = Vec::new();
+        let is_default_rel = preferred_dir
+            .and_then(|p| p.to_str())
+            .map(|s| matches!(s.trim(), "runtime/windivert" | r"runtime\windivert"))
+            .unwrap_or(false);
+
         if let Some(dir) = preferred_dir {
-            candidates.push(dir.join("WinDivert.dll"));
+            if !is_default_rel {
+                candidates.push(dir.join("WinDivert.dll"));
+            }
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
+                candidates.push(parent.join("runtime").join("windivert").join("WinDivert.dll"));
                 candidates.push(parent.join("WinDivert.dll"));
                 candidates.push(parent.join("windivert").join("WinDivert.dll"));
+                for ancestor in parent.ancestors().skip(1).take(8) {
+                    candidates.push(
+                        ancestor
+                            .join("runtime")
+                            .join("windivert")
+                            .join("WinDivert.dll"),
+                    );
+                }
             }
         }
         candidates.push(PathBuf::from("runtime/windivert/WinDivert.dll"));
+        #[cfg(windows)]
+        if let Ok(program_data) = std::env::var("ProgramData") {
+            candidates.push(
+                PathBuf::from(program_data)
+                    .join("Bypath")
+                    .join("windivert")
+                    .join("WinDivert.dll"),
+            );
+        }
         candidates.push(PathBuf::from("WinDivert.dll"));
 
         let chosen = candidates
@@ -83,9 +109,9 @@ impl WinDivertLib {
             .cloned()
             .ok_or_else(|| {
                 anyhow!(
-                    "WinDivert.dll not found. Searched: {:?}. Run `.\\scripts\\fetch-windivert.ps1` \
-                     to download the official signed WinDivert 2.2.2-A binaries (check Windows Security \
-                     if Defender quarantined the driver package).",
+                    "WinDivert.dll not found. Searched: {:?}. Ensure runtime/windivert contains \
+                     WinDivert.dll and WinDivert64.sys (check Windows Security Protection History \
+                     if antivirus quarantined the driver).",
                     candidates
                 )
             })?;

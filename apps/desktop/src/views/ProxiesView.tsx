@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { PlusIcon, RefreshIcon, TrashIcon } from "../components/Icons";
+import { EditIcon, GlobeIcon, PlusIcon, RefreshIcon, TrashIcon } from "../components/Icons";
+import { Select } from "../components/Select";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import type { Config, NamedProxyProbe, ProxyConfig, ProxyKind } from "../lib/types";
@@ -8,11 +9,13 @@ interface ProxiesViewProps {
   config: Config;
   saving: boolean;
   onSaveConfig: (next: Config, toast?: string) => Promise<void>;
+  onNotify: (message: string, isError?: boolean) => void;
 }
 
-export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) {
+export function ProxiesView({ config, saving, onSaveConfig, onNotify }: ProxiesViewProps) {
   const { t } = useI18n();
-  const [showAdd, setShowAdd] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<ProxyKind>("socks5");
   const [address, setAddress] = useState("127.0.0.1:10808");
@@ -22,6 +25,7 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
 
   const [probes, setProbes] = useState<Record<string, NamedProxyProbe>>({});
   const [probingKey, setProbingKey] = useState<string | null>(null);
+  const [readingSystem, setReadingSystem] = useState(false);
 
   const entries = Object.entries(config.proxies).sort(([a], [b]) => a.localeCompare(b));
 
@@ -35,7 +39,76 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
     }
   };
 
-  const handleAddProxy = async (e: React.FormEvent) => {
+  const openAddForm = () => {
+    if (showForm && editingKey === null) {
+      setShowForm(false);
+      return;
+    }
+    setEditingKey(null);
+    setName("");
+    setKind("socks5");
+    setAddress("127.0.0.1:10808");
+    setUsername("");
+    setPassword("");
+    setUdp(true);
+    setShowForm(true);
+  };
+
+  const openEditForm = (key: string, proxy: ProxyConfig) => {
+    setEditingKey(key);
+    setName(key);
+    setKind(proxy.type);
+    setAddress(proxy.address);
+    setUsername(proxy.username ?? "");
+    setPassword(proxy.password ?? "");
+    setUdp(proxy.udp);
+    setShowForm(true);
+  };
+
+  const handleReadSystemProxy = async () => {
+    setReadingSystem(true);
+    try {
+      const info = await api.getSystemProxy();
+      if (!info.enabled || !info.suggested_address) {
+        onNotify(t("proxies.systemNone"), false);
+        return;
+      }
+      const firstExistingKey = entries[0]?.[0] ?? null;
+      const existingProxy = firstExistingKey ? config.proxies[firstExistingKey] : null;
+      if (!showForm) {
+        if (firstExistingKey && existingProxy) {
+          setEditingKey(firstExistingKey);
+          setName(firstExistingKey);
+          setUsername(existingProxy.username ?? "");
+          setPassword(existingProxy.password ?? "");
+        } else {
+          setEditingKey(null);
+          setName("system_proxy");
+          setUsername("");
+          setPassword("");
+        }
+        setShowForm(true);
+      }
+      const keepExistingSocks =
+        existingProxy &&
+        existingProxy.address === info.suggested_address &&
+        existingProxy.type === "socks5" &&
+        !info.socks_address;
+      const nextKind: ProxyKind = keepExistingSocks
+        ? "socks5"
+        : (info.suggested_kind ?? "http");
+      setKind(nextKind);
+      setAddress(info.suggested_address);
+      setUdp(keepExistingSocks ? existingProxy.udp : nextKind === "socks5");
+      onNotify(t("proxies.systemFound", { address: info.suggested_address }), false);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setReadingSystem(false);
+    }
+  };
+
+  const handleSaveProxy = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = name.trim().replace(/\s+/g, "_");
     if (!trimmed || !address.trim()) return;
@@ -48,18 +121,28 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
       udp: kind === "socks5" ? udp : false,
     };
 
+    const nextProxies: Record<string, ProxyConfig> = { ...config.proxies };
+    let nextRules = config.rules;
+
+    if (editingKey && editingKey !== trimmed) {
+      delete nextProxies[editingKey];
+      nextRules = config.rules.map((r) =>
+        r.proxy === editingKey ? { ...r, proxy: trimmed } : r
+      );
+    }
+    nextProxies[trimmed] = nextProxy;
+
     const nextConfig: Config = {
       ...config,
-      proxies: {
-        ...config.proxies,
-        [trimmed]: nextProxy,
-      },
+      proxies: nextProxies,
+      rules: nextRules,
     };
     await onSaveConfig(nextConfig, t("proxies.toastSaved", { name: trimmed }));
+    setEditingKey(null);
     setName("");
     setUsername("");
     setPassword("");
-    setShowAdd(false);
+    setShowForm(false);
     void runProbe(trimmed, nextProxy);
   };
 
@@ -82,7 +165,10 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
     if (referenced) return;
     const nextProxies = { ...config.proxies };
     delete nextProxies[key];
-    await onSaveConfig({ ...config, proxies: nextProxies }, t("proxies.toastRemoved", { name: key }));
+    await onSaveConfig(
+      { ...config, proxies: nextProxies },
+      t("proxies.toastRemoved", { name: key })
+    );
   };
 
   return (
@@ -93,22 +179,39 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
             <h2 className="section-title">{t("proxies.title")}</h2>
             <p className="section-desc">{t("proxies.desc")}</p>
           </div>
-          <button
-            type="button"
-            className={`btn btn-sm ${showAdd ? "btn-secondary" : "btn-primary"}`}
-            onClick={() => setShowAdd((v) => !v)}
-          >
-            <PlusIcon size={13} />
-            <span>{t("proxies.add")}</span>
-          </button>
+          <div className="toolbar-group">
+            <button
+              type="button"
+              className="btn btn-sm btn-outline"
+              disabled={readingSystem}
+              onClick={() => void handleReadSystemProxy()}
+            >
+              <GlobeIcon size={13} />
+              <span>
+                {readingSystem ? t("proxies.readingSystem") : t("proxies.readSystem")}
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${showForm && editingKey === null ? "btn-secondary" : "btn-primary"}`}
+              onClick={openAddForm}
+            >
+              <PlusIcon size={13} />
+              <span>{t("proxies.add")}</span>
+            </button>
+          </div>
         </div>
 
-        {showAdd && (
+        {showForm && (
           <form
             className="composer-panel"
-            onSubmit={(e) => void handleAddProxy(e)}
+            onSubmit={(e) => void handleSaveProxy(e)}
             style={{ marginBottom: 14 }}
           >
+            <div className="section-title" style={{ fontSize: 14 }}>
+              {editingKey ? t("proxies.editTitle") : t("proxies.addTitle")}
+            </div>
+
             <div className="form-grid">
               <div className="form-field">
                 <label className="form-label" htmlFor="proxy-name">
@@ -128,15 +231,16 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
                 <label className="form-label" htmlFor="proxy-kind">
                   {t("proxies.protocol")}
                 </label>
-                <select
+                <Select<ProxyKind>
                   id="proxy-kind"
-                  className="select"
                   value={kind}
-                  onChange={(e) => setKind(e.target.value as ProxyKind)}
-                >
-                  <option value="socks5">{t("proxies.protoSocks5")}</option>
-                  <option value="http">{t("proxies.protoHttp")}</option>
-                </select>
+                  ariaLabel={t("proxies.protocol")}
+                  onChange={(val) => setKind(val)}
+                  options={[
+                    { value: "socks5", label: t("proxies.protoSocks5") },
+                    { value: "http", label: t("proxies.protoHttp") },
+                  ]}
+                />
               </div>
 
               <div className="form-field">
@@ -148,7 +252,7 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
                   className="input mono"
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
-                  placeholder="127.0.0.1:10808"
+                  placeholder="127.0.0.1:7897"
                   required
                 />
               </div>
@@ -202,7 +306,10 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
               <button
                 type="button"
                 className="btn btn-ghost"
-                onClick={() => setShowAdd(false)}
+                onClick={() => {
+                  setEditingKey(null);
+                  setShowForm(false);
+                }}
               >
                 {t("apps.cancel")}
               </button>
@@ -229,6 +336,9 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
               const isReferenced = config.rules.some(
                 (r) => r.enabled && r.action === "proxy" && r.proxy === key
               );
+              const probeOnline = Boolean(
+                probe && probe.report.tcp_reachable && (probe.report.handshake_ok ?? true)
+              );
               return (
                 <div key={key} className="row-item">
                   <div className="row-item-main">
@@ -246,7 +356,7 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
 
                     <div className="row-item-sub">
                       {probe ? (
-                        probe.report.tcp_reachable ? (
+                        probeOnline ? (
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
                             <span className="dot dot-ok" />
                             <span>
@@ -273,7 +383,13 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
                             }}
                           >
                             <span className="dot dot-err" />
-                            <span>{probe.report.error ?? t("proxies.probeFailed")}</span>
+                            <span>
+                              {probe.report.tcp_reachable && probe.report.handshake_ok === false
+                                ? t("proxies.probeHandshakeFail", {
+                                    error: probe.report.error ?? t("proxies.probeFailed"),
+                                  })
+                                : probe.report.error ?? t("proxies.probeFailed")}
+                            </span>
                           </span>
                         )
                       ) : (
@@ -310,6 +426,16 @@ export function ProxiesView({ config, saving, onSaveConfig }: ProxiesViewProps) 
                         />
                       </div>
                     )}
+
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      disabled={saving}
+                      onClick={() => openEditForm(key, proxy)}
+                    >
+                      <EditIcon size={12} />
+                      <span>{t("proxies.edit")}</span>
+                    </button>
 
                     <button
                       type="button"

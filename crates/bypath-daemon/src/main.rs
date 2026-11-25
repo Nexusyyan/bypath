@@ -74,16 +74,17 @@ enum DaemonCommand {
 
 fn main() -> Result<()> {
     let cli = DaemonCli::parse();
-    init_tracing(&cli.log_level);
 
     match cli.command {
         DaemonCommand::ServiceRun { config, autostart } => {
+            // Tracing (including TelemetryLogLayer) is initialized inside run_service_inner.
             run_as_windows_service(config, autostart)
         }
         DaemonCommand::Install {
             config,
             demand_start,
         } => {
+            init_tracing(&cli.log_level);
             let exe = std::env::current_exe()?;
             let cfg_path = config.unwrap_or_else(default_config_path);
             install_service(&exe, &cfg_path, !demand_start)?;
@@ -94,21 +95,25 @@ fn main() -> Result<()> {
             Ok(())
         }
         DaemonCommand::Uninstall => {
+            init_tracing(&cli.log_level);
             uninstall_service()?;
             println!("Uninstalled Windows Service '{SERVICE_NAME}'.");
             Ok(())
         }
         DaemonCommand::Start => {
+            init_tracing(&cli.log_level);
             start_service()?;
             println!("Started Windows Service '{SERVICE_NAME}'.");
             Ok(())
         }
         DaemonCommand::Stop => {
+            init_tracing(&cli.log_level);
             stop_service()?;
             println!("Stopped Windows Service '{SERVICE_NAME}'.");
             Ok(())
         }
         DaemonCommand::Status => {
+            init_tracing(&cli.log_level);
             let s = query_service_status();
             println!(
                 "Service '{SERVICE_NAME}': installed={} running={} state={}",
@@ -127,8 +132,11 @@ fn main() -> Result<()> {
             rt.block_on(async move {
                 let cfg_path = config.unwrap_or_else(default_config_path);
                 let controller = DaemonController::new(cfg_path, BackendMode::Service)?;
+                init_tracing_with_telemetry(&cli.log_level, controller.telemetry());
 
-                if autostart {
+                let should_autostart =
+                    autostart || controller.current_config().general.auto_start_engine;
+                if should_autostart {
                     if let Err(err) = controller.start_engine().await {
                         warn!(error = %err, "autostart engine failed; daemon remains online for IPC");
                     }
@@ -157,9 +165,28 @@ fn init_tracing(level: &str) {
             "bypath_core={level},bypath_windivert={level},bypath_ipc={level},bypath_daemon={level},{level}"
         ))
     });
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .compact()
-        .init();
+        .try_init();
+}
+
+fn init_tracing_with_telemetry(
+    level: &str,
+    telemetry: std::sync::Arc<bypath_core::telemetry::TelemetryHub>,
+) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "bypath_core={level},bypath_windivert={level},bypath_ipc={level},bypath_daemon={level},{level}"
+        ))
+    });
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false).compact())
+        .with(telemetry.log_layer())
+        .try_init();
 }

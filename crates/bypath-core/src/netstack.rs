@@ -29,7 +29,8 @@ use tracing::{debug, info, warn};
 const TCP_RX_BUF_SIZE: usize = 65_536;
 const TCP_TX_BUF_SIZE: usize = 65_536;
 const CHANNEL_CAPACITY: usize = 64;
-const SNIFF_PEEK_TIMEOUT: Duration = Duration::from_millis(150);
+const SNIFF_PEEK_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_SNIFF_BUFFER_BYTES: usize = 8_192;
 
 /// Packet delivered from the dispatcher to the userspace TCP netstack.
 pub struct NetstackInput {
@@ -546,18 +547,19 @@ async fn run_upstream_tcp_relay(
     tracker: Arc<dyn ProcessTracker>,
     runtime: Arc<RwLock<Arc<RuntimeConfig>>>,
 ) {
-    // Wait briefly for the first client payload chunk so we can sniff TLS SNI / HTTP Host
-    // without blocking server-speaks-first protocols (SSH, SMTP, etc.). Always peek in
-    // `InspectDirect` mode (`proxy.is_none()`) so domain rules remain enforceable.
+    // Wait briefly for initial client payload bytes so we can sniff TLS SNI / HTTP Host
+    // without blocking server-speaks-first protocols (SSH, SMTP, etc.). If a large TLS
+    // ClientHello (for example post-quantum hybrid X25519MLKEM768 > 1460B MSS) spans multiple
+    // TCP segments, accumulate until the TLS record is complete or the peek budget expires.
     let should_peek = enable_sniffing || proxy.is_none();
     let first_chunk = if should_peek {
-        match tokio::time::timeout(SNIFF_PEEK_TIMEOUT, to_upstream_rx.recv()).await {
-            Ok(Some(bytes)) => Some(bytes),
-            Ok(None) => {
+        match read_initial_sniff_buffer(&mut to_upstream_rx, SNIFF_PEEK_TIMEOUT).await {
+            InitialRead::Data(bytes) => Some(bytes),
+            InitialRead::Closed => {
                 telemetry.close_connection(conn_id, None);
                 return;
             }
-            Err(_) => None,
+            InitialRead::Timeout => None,
         }
     } else {
         None
@@ -737,6 +739,58 @@ async fn run_upstream_tcp_relay(
 
     let _ = writer.await;
     telemetry.close_connection(conn_id, close_error);
+}
+
+enum InitialRead {
+    Data(Bytes),
+    Closed,
+    Timeout,
+}
+
+async fn read_initial_sniff_buffer(
+    rx: &mut mpsc::Receiver<Bytes>,
+    budget: Duration,
+) -> InitialRead {
+    let deadline = tokio::time::Instant::now() + budget;
+    let first = match tokio::time::timeout_at(deadline, rx.recv()).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return InitialRead::Closed,
+        Err(_) => return InitialRead::Timeout,
+    };
+
+    // Fast path: already sniffable or not a fragmented TLS Handshake record.
+    if sniff_tcp_payload(&first).is_some() || !needs_more_tls_bytes(&first) {
+        return InitialRead::Data(first);
+    }
+
+    let mut acc = Vec::with_capacity(MAX_SNIFF_BUFFER_BYTES.min(first.len() + 2048));
+    acc.extend_from_slice(&first);
+
+    while acc.len() < MAX_SNIFF_BUFFER_BYTES && needs_more_tls_bytes(&acc) {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(more)) => {
+                acc.extend_from_slice(&more);
+                if sniff_tcp_payload(&acc).is_some() {
+                    break;
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    InitialRead::Data(Bytes::from(acc))
+}
+
+fn needs_more_tls_bytes(data: &[u8]) -> bool {
+    if data.len() < 2 || data[0] != 0x16 || data[1] != 0x03 {
+        return false;
+    }
+    if data.len() < 5 {
+        return true;
+    }
+    let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+    let total_needed = 5usize.saturating_add(record_len).min(MAX_SNIFF_BUFFER_BYTES);
+    data.len() < total_needed
 }
 
 fn to_smol_ip(ip: IpAddr) -> IpAddress {

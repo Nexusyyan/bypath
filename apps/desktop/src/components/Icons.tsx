@@ -269,3 +269,118 @@ export function ChevronRightIcon(props: IconProps) {
     </svg>
   );
 }
+
+export function EditIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M16.5 4.5l3 3L8.5 18.5H5.5v-3L16.5 4.5z" />
+    </svg>
+  );
+}
+
+export function CopyIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <rect x="9" y="9" width="10.5" height="10.5" rx="2" />
+      <path d="M15 9V6.5a2 2 0 0 0-2-2H6.5a2 2 0 0 0-2 2V13a2 2 0 0 0 2 2H9" />
+    </svg>
+  );
+}
+
+export function ArrowUpIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M12 18V6M7 11l5-5 5 5" />
+    </svg>
+  );
+}
+
+export function ArrowDownIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M12 6v12M7 13l5 5 5-5" />
+    </svg>
+  );
+}
+
+export function SunIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 3v2M12 19v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </svg>
+  );
+}
+
+export function MoonIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M19.5 14.5A7.5 7.5 0 1 1 9.5 4.5a6 6 0 0 0 10 10z" />
+    </svg>
+  );
+}
+
+export function MonitorIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <rect x="3.5" y="4.5" width="17" height="12" rx="2" />
+      <path d="M9 20h6M12 16.5V20" />
+    </svg>
+  );
+}
+
+export function DownloadIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14" />
+    </svg>
+  );
+}
+
+export function UploadIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19h14" />
+    </svg>
+  );
+}
+
+export function FolderIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M3.5 7.5a2 2 0 0 1 2-2h4.2l1.8 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5z" />
+    </svg>
+  );
+}
+
+export function BypassIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M5 12h14M13.5 6.5L19 12l-5.5 5.5" />
+    </svg>
+  );
+}
+
+export function TestIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M9 3h6M10 3v5.5L5.2 17a2.2 2.2 0 0 0 1.9 3.3h9.8a2.2 2.2 0 0 0 1.9-3.3L14 8.5V3" />
+    </svg>
+  );
+}
+
+export function ArrowUpRightIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M7 17L17 7M9 7h8v8" />
+    </svg>
+  );
+}
+
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M6.5 9.5L12 15l5.5-5.5" />
+    </svg>
+  );
+}

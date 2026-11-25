@@ -1,10 +1,49 @@
 use crate::capture::{FiveTuple, TransportProtocol};
 use crate::config::{Config, RuleAction, RuleConfig};
-use crate::process::{ProcessInfo, ProcessTracker};
+use crate::process::{MockProcessTracker, ProcessInfo, ProcessTracker};
 use ipnet::IpNet;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::RwLock;
+
+/// Dry-run query used by GUI / CLI / Agent tools to test rule matching without live traffic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleTestQuery {
+    #[serde(default)]
+    pub process_name: Option<String>,
+    #[serde(default)]
+    pub exe_path: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub dst_ip: Option<String>,
+    #[serde(default = "default_test_port")]
+    pub dst_port: u16,
+    #[serde(default = "default_test_protocol")]
+    pub protocol: String,
+}
+
+fn default_test_port() -> u16 {
+    443
+}
+
+fn default_test_protocol() -> String {
+    "tcp".to_string()
+}
+
+/// Structured explanation of Phase 1 (L4) and Phase 2 (L7 SNI/Host) rule evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleTestReport {
+    pub phase1_decision: String,
+    pub phase1_rule: Option<String>,
+    pub phase1_reason: String,
+    pub phase2_decision: Option<String>,
+    pub phase2_rule: Option<String>,
+    pub final_action: String,
+    pub final_proxy: Option<String>,
+    pub matched_rule: Option<String>,
+}
 
 /// Final L4 routing verdict for a flow before application-layer payload sniffing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,13 +205,14 @@ impl RuleEngine {
     }
 
     /// Registers an additional exempt PID (for example, the local upstream proxy daemon)
-    /// so its outbound connections are never re-intercepted.
-    pub fn add_exempt_pid(&self, pid: u32) {
+    /// so its outbound connections are never re-intercepted. Returns `true` if newly added.
+    pub fn add_exempt_pid(&self, pid: u32) -> bool {
         if pid != 0 {
             if let Ok(mut guard) = self.exempt_pids.write() {
-                guard.insert(pid);
+                return guard.insert(pid);
             }
         }
+        false
     }
 
     /// Evaluates L4 routing for a given `(pid, tuple)` before domain sniffing.
@@ -334,6 +374,159 @@ impl RuleEngine {
                 && rule.action == RuleAction::Block
                 && rule_matches_proc_and_target(rule, tuple, &chain)
         })
+    }
+
+    /// Runs a deterministic dry-run evaluation across Phase 1 (L4/process) and Phase 2 (L7 domain)
+    /// so GUI, CLI, and AI Agents can verify how a hypothetical flow would be routed.
+    pub fn test_query(&self, query: &RuleTestQuery) -> RuleTestReport {
+        let protocol = match query.protocol.trim().to_ascii_lowercase().as_str() {
+            "udp" => TransportProtocol::Udp,
+            _ => TransportProtocol::Tcp,
+        };
+        let dst_ip = query
+            .dst_ip
+            .as_deref()
+            .and_then(|s| s.trim().parse::<IpAddr>().ok())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::new(142, 250, 190, 78)));
+        let tuple = FiveTuple {
+            protocol,
+            src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            src_port: 55000,
+            dst_ip,
+            dst_port: query.dst_port,
+        };
+
+        let proc_name = query
+            .process_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                query
+                    .exe_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name())
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            });
+
+        let (pid, tracker) = match proc_name {
+            Some(name) => {
+                let exe_path = query
+                    .exe_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                (
+                    Some(42424u32),
+                    MockProcessTracker::with_processes([ProcessInfo {
+                        pid: 42424,
+                        parent_pid: 4,
+                        name,
+                        exe_path,
+                    }]),
+                )
+            }
+            None => (None, MockProcessTracker::default()),
+        };
+
+        let p1 = self.evaluate(pid, &tuple, &tracker);
+        let (phase1_decision, phase1_rule, phase1_reason, mut final_action, mut final_proxy, mut matched_rule) =
+            match p1 {
+                RouteDecision::Direct { reason } => (
+                    "direct".to_string(),
+                    None,
+                    reason.to_string(),
+                    "direct".to_string(),
+                    None,
+                    None,
+                ),
+                RouteDecision::InspectDirect { rule_name } => (
+                    "inspect_direct".to_string(),
+                    Some(rule_name.clone()),
+                    "matched process-scoped domain rule (inspect SNI/Host)".to_string(),
+                    "direct".to_string(),
+                    None,
+                    Some(rule_name),
+                ),
+                RouteDecision::Block { rule_name } => (
+                    "block".to_string(),
+                    Some(rule_name.clone()),
+                    "matched L4 block rule".to_string(),
+                    "block".to_string(),
+                    None,
+                    Some(rule_name),
+                ),
+                RouteDecision::Proxy {
+                    rule_name,
+                    proxy_name,
+                } => (
+                    "proxy".to_string(),
+                    Some(rule_name.clone()),
+                    format!("matched proxy rule -> {proxy_name}"),
+                    "proxy".to_string(),
+                    Some(proxy_name),
+                    Some(rule_name),
+                ),
+            };
+
+        let mut phase2_decision = None;
+        let mut phase2_rule = None;
+
+        // Phase 2 domain rules only run on flows intercepted for TCP sniffing (Proxy or InspectDirect).
+        let can_inspect_domain = matches!(phase1_decision.as_str(), "proxy" | "inspect_direct")
+            && protocol == TransportProtocol::Tcp;
+
+        if can_inspect_domain {
+            if let Some(host) = query
+                .host
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Some(d2) = self.evaluate_domain(pid, &tuple, host, &tracker) {
+                    match d2 {
+                        DomainDecision::Block { rule_name } => {
+                            phase2_decision = Some("block".to_string());
+                            phase2_rule = Some(rule_name.clone());
+                            final_action = "block".to_string();
+                            final_proxy = None;
+                            matched_rule = Some(rule_name);
+                        }
+                        DomainDecision::Direct { rule_name } => {
+                            phase2_decision = Some("direct".to_string());
+                            phase2_rule = Some(rule_name.clone());
+                            final_action = "direct".to_string();
+                            final_proxy = None;
+                            matched_rule = Some(rule_name);
+                        }
+                        DomainDecision::Proxy {
+                            rule_name,
+                            proxy_name,
+                        } => {
+                            phase2_decision = Some("proxy".to_string());
+                            phase2_rule = Some(rule_name.clone());
+                            final_action = "proxy".to_string();
+                            final_proxy = Some(proxy_name);
+                            matched_rule = Some(rule_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        RuleTestReport {
+            phase1_decision,
+            phase1_rule,
+            phase1_reason,
+            phase2_decision,
+            phase2_rule,
+            final_action,
+            final_proxy,
+            matched_rule,
+        }
     }
 }
 
@@ -693,5 +886,50 @@ mod tests {
                 reason: "default_direct"
             }
         );
+    }
+
+    #[test]
+    fn rule_dry_run_explains_phase1_and_phase2_decisions() {
+        let mut cfg = sample_config();
+        cfg.rules.push(RuleConfig {
+            name: "Block Trackers".into(),
+            enabled: true,
+            process_names: vec![],
+            path_prefixes: vec![],
+            path_contains: vec![],
+            include_children: true,
+            dst_cidrs: vec![],
+            dst_ports: vec![],
+            protocols: vec![],
+            domains: vec!["*.doubleclick.net".into()],
+            action: RuleAction::Block,
+            proxy: None,
+        });
+        let engine = RuleEngine::from_config(&cfg).unwrap();
+
+        let blocked = engine.test_query(&RuleTestQuery {
+            process_name: Some("Antigravity.exe".into()),
+            exe_path: None,
+            host: Some("ad.doubleclick.net".into()),
+            dst_ip: None,
+            dst_port: 443,
+            protocol: "tcp".into(),
+        });
+        assert_eq!(blocked.phase1_decision, "proxy");
+        assert_eq!(blocked.phase2_decision.as_deref(), Some("block"));
+        assert_eq!(blocked.final_action, "block");
+        assert_eq!(blocked.matched_rule.as_deref(), Some("Block Trackers"));
+
+        let proxied = engine.test_query(&RuleTestQuery {
+            process_name: Some("Antigravity.exe".into()),
+            exe_path: None,
+            host: Some("aicode.googleapis.com".into()),
+            dst_ip: None,
+            dst_port: 443,
+            protocol: "tcp".into(),
+        });
+        assert_eq!(proxied.final_action, "proxy");
+        assert_eq!(proxied.final_proxy.as_deref(), Some("local"));
+        assert!(proxied.phase2_decision.is_none());
     }
 }

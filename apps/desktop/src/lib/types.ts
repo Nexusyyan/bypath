@@ -1,9 +1,23 @@
+export const APP_VERSION = "0.4.1";
+
 export type BackendMode = "service" | "embedded";
 export type ProxyKind = "socks5" | "http";
 export type RuleAction = "proxy" | "direct" | "block";
 export type ConnectionProtocol = "tcp" | "udp" | "quic";
 export type ConnectionAction = "proxy" | "direct" | "block";
 export type ConnectionState = "active" | "closed" | "failed" | "blocked";
+export type StateFilter = "all" | "active" | "blocked";
+export type SortKey =
+  | "time"
+  | "transfer"
+  | "tx"
+  | "rx"
+  | "process"
+  | "destination"
+  | "state"
+  | "proto";
+export type SortDir = "asc" | "desc";
+export type ConnectionsViewMode = "streams" | "summary";
 
 export interface GeneralConfig {
   log_level: string;
@@ -11,6 +25,10 @@ export interface GeneralConfig {
   block_quic_when_no_udp: boolean;
   bypass_lan: boolean;
   windivert_dir: string;
+  minimize_to_tray: boolean;
+  auto_start_engine: boolean;
+  theme: string;
+  auto_check_updates?: boolean;
 }
 
 export interface ProxyConfig {
@@ -72,6 +90,8 @@ export interface DaemonStatus {
   windivert_dll_path: string | null;
   windivert_version: string | null;
   windivert_error: string | null;
+  windivert_error_kind?: string | null;
+  portable_mode?: boolean;
   config_path: string;
   active_rules_count: number;
   total_rules_count: number;
@@ -115,6 +135,8 @@ export interface ProxyProbeReport {
   address: string;
   kind: ProxyKind;
   tcp_reachable: boolean;
+  handshake_ok?: boolean | null;
+  auth_ok?: boolean | null;
   latency_ms: number | null;
   udp_associate_supported: boolean | null;
   error: string | null;
@@ -133,7 +155,64 @@ export interface DoctorReport {
   windivert_driver_opened: boolean;
   windivert_version: string | null;
   windivert_error: string | null;
+  windivert_error_kind?: string | null;
   proxies: NamedProxyProbe[];
+}
+
+export interface SystemProxyInfo {
+  enabled: boolean;
+  source: string;
+  raw_server: string | null;
+  socks_address: string | null;
+  http_address: string | null;
+  bypass_list: string | null;
+  suggested_kind: ProxyKind | null;
+  suggested_address: string | null;
+}
+
+export interface RuleTestQuery {
+  process_name?: string | null;
+  exe_path?: string | null;
+  host?: string | null;
+  dst_ip?: string | null;
+  dst_port: number;
+  protocol: string;
+}
+
+export interface RuleTestReport {
+  phase1_decision: string;
+  phase1_rule: string | null;
+  phase1_reason: string;
+  phase2_decision: string | null;
+  phase2_rule: string | null;
+  final_action: string;
+  final_proxy: string | null;
+  matched_rule: string | null;
+}
+
+export interface LogEntry {
+  id: number;
+  timestamp_ms: number;
+  level: string;
+  target: string;
+  message: string;
+}
+
+export interface AgentInfo {
+  cli_path: string;
+  pipe_name: string;
+  config_path: string;
+  windivert_dir: string;
+  portable_mode: boolean;
+}
+
+export interface TrayStatePayload {
+  status_label: string;
+  show_label: string;
+  toggle_label: string;
+  quit_label: string;
+  tooltip: string;
+  minimize_to_tray: boolean;
 }
 
 export interface PresetInfo {
@@ -152,11 +231,48 @@ export interface ServiceStateSummary {
   state: string;
 }
 
+export interface UpdateCheckReport {
+  current_version: string;
+  latest_version: string;
+  latest_tag: string;
+  update_available: boolean;
+  release_name: string;
+  release_url: string;
+  published_at: string | null;
+  release_notes: string | null;
+  primary_asset_name: string | null;
+  primary_asset_url: string | null;
+  primary_asset_size: number | null;
+  nodriver_asset_name: string | null;
+  nodriver_asset_url: string | null;
+  checked_via: string;
+  checked_at_ms: number;
+}
+
+export interface ThroughputPoint {
+  tx: number;
+  rx: number;
+}
+
+export interface ConnectionsViewState {
+  selectedProcess: string;
+  query: string;
+  filter: StateFilter;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  pageSize: number;
+  page: number;
+  expandedId: number | null;
+  viewMode: ConnectionsViewMode;
+  summaryGroup: "process" | "domain";
+}
+
 export type EngineEvent =
   | { type: "stats_tick"; stats: EngineStats }
   | { type: "connection_upsert"; connection: ConnectionRecord }
   | { type: "connections_cleared" }
   | { type: "config_reloaded"; rules_count: number; proxies_count: number }
-  | { type: "state_changed"; running: boolean; error: string | null };
+  | { type: "state_changed"; running: boolean; error: string | null }
+  | { type: "log_entry"; entry: LogEntry };
 
 export type NavTab = "connections" | "applications" | "proxies" | "diagnostics";

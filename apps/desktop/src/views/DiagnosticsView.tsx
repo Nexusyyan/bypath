@@ -1,33 +1,71 @@
-import { useEffect, useState } from "react";
-import { RefreshIcon } from "../components/Icons";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowUpRightIcon,
+  CopyIcon,
+  DownloadIcon,
+  FolderIcon,
+  RefreshIcon,
+  UploadIcon,
+} from "../components/Icons";
 import { api } from "../lib/api";
+import { formatTime } from "../lib/format";
 import { useI18n } from "../lib/i18n";
-import type { Config, DaemonStatus, DoctorReport, ServiceStateSummary } from "../lib/types";
+import { useTheme, type ThemeMode } from "../lib/theme";
+import {
+  APP_VERSION,
+  type AgentInfo,
+  type Config,
+  type DaemonStatus,
+  type DoctorReport,
+  type LogEntry,
+  type ServiceStateSummary,
+  type UpdateCheckReport,
+} from "../lib/types";
 
 interface DiagnosticsViewProps {
   status: DaemonStatus | null;
   config: Config;
   configPath: string;
+  logs: LogEntry[];
   saving: boolean;
+  updateReport: UpdateCheckReport | null;
+  checkingUpdates: boolean;
+  updateError: string | null;
+  onCheckUpdates: () => void;
   onSaveConfig: (next: Config, toast?: string) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
+  onNotify: (message: string, isError?: boolean) => void;
 }
+
+type LogLevelFilter = "ALL" | "WARN" | "ERROR";
+
+const RELEASES_FALLBACK_URL = "https://github.com/Nexusyyan/bypath/releases";
 
 export function DiagnosticsView({
   status,
   config,
   configPath,
+  logs,
   saving,
+  updateReport,
+  checkingUpdates,
+  updateError,
+  onCheckUpdates,
   onSaveConfig,
   onRefreshStatus,
+  onNotify,
 }: DiagnosticsViewProps) {
   const { locale, setLocale, t } = useI18n();
+  const { mode: themeMode, setMode: setThemeMode } = useTheme();
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [runningDoctor, setRunningDoctor] = useState(false);
   const [serviceState, setServiceState] = useState<ServiceStateSummary | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
   const [serviceError, setServiceError] = useState<string | null>(null);
   const [windivertDir, setWindivertDir] = useState(config.general.windivert_dir);
+  const [logLevel, setLogLevel] = useState<LogLevelFilter>("ALL");
+  const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setWindivertDir(config.general.windivert_dir);
@@ -36,9 +74,14 @@ export function DiagnosticsView({
   const runChecks = async () => {
     setRunningDoctor(true);
     try {
-      const [doc, svc] = await Promise.all([api.runDoctor(), api.getServiceStatus()]);
+      const [doc, svc, agent] = await Promise.all([
+        api.runDoctor(),
+        api.getServiceStatus(),
+        api.getAgentInfo(),
+      ]);
       setDoctor(doc);
       setServiceState(svc);
+      setAgentInfo(agent);
     } finally {
       setRunningDoctor(false);
     }
@@ -66,13 +109,35 @@ export function DiagnosticsView({
   };
 
   const toggleGeneral = async (
-    key: "enable_sniffing" | "block_quic_when_no_udp" | "bypass_lan"
+    key:
+      | "enable_sniffing"
+      | "block_quic_when_no_udp"
+      | "bypass_lan"
+      | "minimize_to_tray"
+      | "auto_start_engine"
+      | "auto_check_updates"
   ) => {
+    const currentVal =
+      key === "auto_check_updates"
+        ? (config.general.auto_check_updates ?? true)
+        : config.general[key];
     const next: Config = {
       ...config,
       general: {
         ...config.general,
-        [key]: !config.general[key],
+        [key]: !currentVal,
+      },
+    };
+    await onSaveConfig(next, t("diag.toastPrefUpdated"));
+  };
+
+  const handleThemeChange = async (nextTheme: ThemeMode) => {
+    setThemeMode(nextTheme);
+    const next: Config = {
+      ...config,
+      general: {
+        ...config.general,
+        theme: nextTheme,
       },
     };
     await onSaveConfig(next, t("diag.toastPrefUpdated"));
@@ -91,6 +156,100 @@ export function DiagnosticsView({
     await runChecks();
   };
 
+  const handleBrowseWindivert = async () => {
+    const picked = await api.pickDirectory(t("diag.wdDirTitle"));
+    if (!picked) return;
+    setWindivertDir(picked);
+    const next: Config = {
+      ...config,
+      general: {
+        ...config.general,
+        windivert_dir: picked,
+      },
+    };
+    await onSaveConfig(next, t("diag.toastWdSaved"));
+    await runChecks();
+  };
+
+  const handleExportToml = async () => {
+    try {
+      const tomlText = await api.exportConfigToml();
+      const blob = new Blob([tomlText], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "bypath-config.toml";
+      a.click();
+      URL.revokeObjectURL(url);
+      onNotify(t("diag.toastExported"), false);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    }
+  };
+
+  const handleImportTomlFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      await api.importConfigToml(raw);
+      await onRefreshStatus();
+      onNotify(t("diag.toastImported"), false);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    }
+  };
+
+  const copyText = (text: string) => {
+    void navigator.clipboard.writeText(text).then(() => {
+      onNotify(t("connections.copied"), false);
+    });
+  };
+
+  const filteredLogs = useMemo(() => {
+    return logs.filter((entry) => {
+      if (logLevel === "ERROR") return entry.level === "ERROR";
+      if (logLevel === "WARN") return entry.level === "WARN" || entry.level === "ERROR";
+      return true;
+    });
+  }, [logs, logLevel]);
+
+  const mcpSnippet = useMemo(() => {
+    const cli = agentInfo?.cli_path ?? "bypath.exe";
+    return JSON.stringify(
+      {
+        mcpServers: {
+          bypath: {
+            command: cli,
+            args: ["mcp"],
+          },
+        },
+      },
+      null,
+      2
+    );
+  }, [agentInfo]);
+
+  const cliSnippet = useMemo(() => {
+    const cli = agentInfo?.cli_path ?? "bypath.exe";
+    return `"${cli}" ctl --json status\n"${cli}" ctl --json system-proxy\n"${cli}" ctl --json rule test --process Antigravity.exe --host aicode.googleapis.com`;
+  }, [agentInfo]);
+
+  const handleCopyDiagSummary = () => {
+    const summary = JSON.stringify(
+      {
+        status,
+        doctor,
+        serviceState,
+        recentLogs: filteredLogs.slice(0, 40),
+      },
+      null,
+      2
+    );
+    copyText(summary);
+  };
+
   const formatServiceBadge = (state: string | undefined): string => {
     switch (state) {
       case "running":
@@ -105,6 +264,11 @@ export function DiagnosticsView({
         return t("diag.svcStateNotInstalled");
     }
   };
+
+  const driverBlocked =
+    doctor?.windivert_error_kind === "blocked_by_security" ||
+    doctor?.windivert_error_kind === "invalid_signature" ||
+    doctor?.windivert_error_kind === "missing_sys";
 
   return (
     <div className="view-container">
@@ -169,50 +333,67 @@ export function DiagnosticsView({
                     })
                   : doctor?.windivert_error ?? t("diag.driverChecking")}
               </div>
+              {driverBlocked && (
+                <div className="row-item-sub" style={{ marginTop: 4 }}>
+                  {t("diag.driverBlockedHint")}
+                </div>
+              )}
             </div>
-            <span className="tag tag-mono">
-              {doctor?.windivert_driver_opened
-                ? doctor.windivert_version ?? t("diag.tagReady")
-                : doctor?.windivert_dll_loaded
-                  ? t("diag.tagNeedsAdmin")
-                  : t("diag.tagMissing")}
-            </span>
-          </div>
-
-          {(doctor?.proxies ?? []).map((p) => (
-            <div key={p.name} className="row-item">
-              <div className="row-item-main">
-                <div className="row-item-title">
-                  <span
-                    className={`dot ${p.report.tcp_reachable ? "dot-ok" : "dot-err"}`}
-                  />
-                  <span>{t("diag.upstreamPrefix", { name: p.name })}</span>
-                  <span
-                    className="mono"
-                    style={{ fontWeight: 450, color: "var(--ink-secondary)" }}
-                  >
-                    {p.report.address}
-                  </span>
-                </div>
-                <div className="row-item-sub">
-                  {p.report.tcp_reachable
-                    ? t("diag.upstreamOk", {
-                        ms: p.report.latency_ms ?? 0,
-                        udp: p.report.udp_associate_supported
-                          ? t("diag.upstreamUdpOk")
-                          : t("diag.upstreamTcpOnly"),
-                        pid: p.local_listener_pid
-                          ? t("diag.upstreamAntiLoop", { pid: p.local_listener_pid })
-                          : "",
-                      })
-                    : p.report.error ?? t("diag.unreachable")}
-                </div>
-              </div>
+            <div className="row-item-actions">
+              {driverBlocked && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline"
+                  onClick={() => void api.openWindowsSecurity()}
+                >
+                  {t("diag.openSecurity")}
+                </button>
+              )}
               <span className="tag tag-mono">
-                {p.report.tcp_reachable ? t("diag.tagOnline") : t("diag.tagOffline")}
+                {doctor?.windivert_driver_opened
+                  ? doctor.windivert_version ?? t("diag.tagReady")
+                  : doctor?.windivert_dll_loaded
+                    ? t("diag.tagNeedsAdmin")
+                    : t("diag.tagMissing")}
               </span>
             </div>
-          ))}
+          </div>
+
+          {(doctor?.proxies ?? []).map((p) => {
+            const ok = p.report.tcp_reachable && (p.report.handshake_ok ?? true);
+            return (
+              <div key={p.name} className="row-item">
+                <div className="row-item-main">
+                  <div className="row-item-title">
+                    <span className={`dot ${ok ? "dot-ok" : "dot-err"}`} />
+                    <span>{t("diag.upstreamPrefix", { name: p.name })}</span>
+                    <span
+                      className="mono"
+                      style={{ fontWeight: 450, color: "var(--ink-secondary)" }}
+                    >
+                      {p.report.address}
+                    </span>
+                  </div>
+                  <div className="row-item-sub">
+                    {ok
+                      ? t("diag.upstreamOk", {
+                          ms: p.report.latency_ms ?? 0,
+                          udp: p.report.udp_associate_supported
+                            ? t("diag.upstreamUdpOk")
+                            : t("diag.upstreamTcpOnly"),
+                          pid: p.local_listener_pid
+                            ? t("diag.upstreamAntiLoop", { pid: p.local_listener_pid })
+                            : "",
+                        })
+                      : p.report.error ?? t("diag.unreachable")}
+                  </div>
+                </div>
+                <span className="tag tag-mono">
+                  {ok ? t("diag.tagOnline") : t("diag.tagOffline")}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -302,6 +483,127 @@ export function DiagnosticsView({
       <section>
         <div className="section-head">
           <div>
+            <h2 className="section-title">{t("diag.updatesTitle")}</h2>
+            <p className="section-desc">{t("diag.updatesDesc")}</p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline"
+            disabled={checkingUpdates}
+            onClick={onCheckUpdates}
+          >
+            <RefreshIcon size={13} />
+            <span>{checkingUpdates ? t("diag.checkingUpdates") : t("diag.checkUpdates")}</span>
+          </button>
+        </div>
+
+        <div className="row-list">
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">
+                <span
+                  className={`dot ${
+                    updateError
+                      ? "dot-err"
+                      : updateReport?.update_available
+                        ? "dot-warn"
+                        : updateReport
+                          ? "dot-ok"
+                          : "dot-idle"
+                  }`}
+                />
+                <span>
+                  {t("diag.versionLabel", {
+                    version: updateReport?.current_version ?? APP_VERSION,
+                  })}
+                </span>
+                {updateReport && (
+                  <span className="tag tag-mono">
+                    {updateReport.update_available
+                      ? t("diag.updateTagNew", { tag: updateReport.latest_tag })
+                      : t("diag.updateTagLatest")}
+                  </span>
+                )}
+              </div>
+              <div className="row-item-sub">
+                {updateError
+                  ? updateError
+                  : updateReport
+                    ? updateReport.update_available
+                      ? updateReport.published_at
+                        ? t("diag.updateFoundDated", {
+                            latest: updateReport.latest_tag,
+                            date: updateReport.published_at.slice(0, 10),
+                            via: updateReport.checked_via,
+                          })
+                        : t("diag.updateFound", {
+                            latest: updateReport.latest_tag,
+                            via: updateReport.checked_via,
+                          })
+                      : t("diag.updateUpToDate", {
+                          latest: updateReport.latest_tag,
+                          via: updateReport.checked_via,
+                        })
+                    : t("diag.updateIdle")}
+              </div>
+            </div>
+
+            <div className="row-item-actions">
+              {updateReport?.update_available ? (
+                <>
+                  {updateReport.primary_asset_url && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      onClick={() =>
+                        void api.openExternalUrl(updateReport.primary_asset_url!).catch((e) =>
+                          onNotify(e instanceof Error ? e.message : String(e), true)
+                        )
+                      }
+                    >
+                      <DownloadIcon size={12} />
+                      <span>{t("diag.downloadZip")}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() =>
+                      void api.openExternalUrl(updateReport.release_url).catch((e) =>
+                        onNotify(e instanceof Error ? e.message : String(e), true)
+                      )
+                    }
+                  >
+                    <ArrowUpRightIcon size={12} />
+                    <span>{t("diag.releaseNotes")}</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost"
+                  onClick={() =>
+                    void api
+                      .openExternalUrl(updateReport?.release_url ?? RELEASES_FALLBACK_URL)
+                      .catch((e) => onNotify(e instanceof Error ? e.message : String(e), true))
+                  }
+                >
+                  <ArrowUpRightIcon size={12} />
+                  <span>{t("diag.openReleases")}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {updateReport?.update_available && updateReport.release_notes && (
+            <pre className="update-notes">{updateReport.release_notes}</pre>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <div className="section-head">
+          <div>
             <h2 className="section-title">{t("diag.prefsTitle")}</h2>
             <p className="section-desc">{t("diag.prefsDesc")}</p>
           </div>
@@ -329,6 +631,74 @@ export function DiagnosticsView({
                 {t("lang.en")}
               </button>
             </div>
+          </div>
+
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">{t("diag.themeTitle")}</div>
+              <div className="row-item-sub">{t("diag.themeDesc")}</div>
+            </div>
+            <div className="segmented" role="group" aria-label={t("diag.themeTitle")}>
+              {(["system", "light", "dark"] as ThemeMode[]).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`segmented-btn ${themeMode === m ? "active" : ""}`}
+                  onClick={() => void handleThemeChange(m)}
+                >
+                  {m === "system"
+                    ? t("theme.system")
+                    : m === "light"
+                      ? t("theme.light")
+                      : t("theme.dark")}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">{t("diag.trayTitle")}</div>
+              <div className="row-item-sub">{t("diag.trayDesc")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.general.minimize_to_tray}
+              className="switch"
+              disabled={saving}
+              onClick={() => void toggleGeneral("minimize_to_tray")}
+            />
+          </div>
+
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">{t("diag.autostartTitle")}</div>
+              <div className="row-item-sub">{t("diag.autostartDesc")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.general.auto_start_engine}
+              className="switch"
+              disabled={saving}
+              onClick={() => void toggleGeneral("auto_start_engine")}
+            />
+          </div>
+
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">{t("diag.autoUpdateTitle")}</div>
+              <div className="row-item-sub">{t("diag.autoUpdateDesc")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.general.auto_check_updates ?? true}
+              className="switch"
+              disabled={saving}
+              onClick={() => void toggleGeneral("auto_check_updates")}
+            />
           </div>
 
           <div className="row-item">
@@ -384,11 +754,18 @@ export function DiagnosticsView({
             <div className="row-item-actions">
               <input
                 className="input mono"
-                style={{ width: 240, height: 30 }}
+                style={{ width: 220, height: 30 }}
                 value={windivertDir}
                 onChange={(e) => setWindivertDir(e.target.value)}
                 aria-label={t("diag.wdDirTitle")}
               />
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => void handleBrowseWindivert()}
+              >
+                {t("diag.browseDir")}
+              </button>
               <button
                 type="submit"
                 className="btn btn-sm btn-outline"
@@ -398,7 +775,142 @@ export function DiagnosticsView({
               </button>
             </div>
           </form>
+
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">
+                <span>{t("diag.configPortabilityTitle")}</span>
+                {status?.portable_mode && (
+                  <span className="tag tag-mono">{t("diag.portableTag")}</span>
+                )}
+              </div>
+              <div className="row-item-sub">{t("diag.configPortabilityDesc")}</div>
+            </div>
+            <div className="row-item-actions">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".toml,text/plain"
+                style={{ display: "none" }}
+                onChange={(e) => void handleImportTomlFile(e)}
+              />
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => void api.openPathInExplorer(configPath)}
+              >
+                <FolderIcon size={13} />
+                <span>{t("diag.openFolder")}</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline"
+                onClick={() => void handleExportToml()}
+              >
+                <DownloadIcon size={13} />
+                <span>{t("diag.exportToml")}</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <UploadIcon size={13} />
+                <span>{t("diag.importToml")}</span>
+              </button>
+            </div>
+          </div>
         </div>
+      </section>
+
+      <section>
+        <div className="section-head">
+          <div>
+            <h2 className="section-title">{t("diag.logsTitle")}</h2>
+            <p className="section-desc">{t("diag.logsDesc")}</p>
+          </div>
+          <div className="toolbar-group">
+            <div className="segmented" role="group" aria-label={t("diag.logsTitle")}>
+              {(["ALL", "WARN", "ERROR"] as LogLevelFilter[]).map((lvl) => (
+                <button
+                  key={lvl}
+                  type="button"
+                  className={`segmented-btn ${logLevel === lvl ? "active" : ""}`}
+                  onClick={() => setLogLevel(lvl)}
+                >
+                  {lvl === "ALL"
+                    ? t("diag.logsAll")
+                    : lvl === "WARN"
+                      ? t("diag.logsWarn")
+                      : t("diag.logsError")}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline"
+              onClick={handleCopyDiagSummary}
+            >
+              <CopyIcon size={12} />
+              <span>{t("diag.copyDiag")}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="row-list">
+          {filteredLogs.length === 0 ? (
+            <div className="empty-state" style={{ padding: "24px 16px" }}>
+              <p className="empty-desc">{t("diag.logsEmpty")}</p>
+            </div>
+          ) : (
+            <div className="log-box" role="log" aria-label={t("diag.logsTitle")}>
+              {filteredLogs.slice(0, 120).map((entry) => {
+                const lvlCls =
+                  entry.level === "ERROR"
+                    ? "log-lvl-error"
+                    : entry.level === "WARN"
+                      ? "log-lvl-warn"
+                      : "log-lvl-info";
+                return (
+                  <div key={entry.id} className="log-row">
+                    <span className="log-ts">{formatTime(entry.timestamp_ms)}</span>
+                    <span className={lvlCls}>{entry.level}</span>
+                    <span className="log-msg">{entry.message}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <div className="section-head">
+          <div>
+            <h2 className="section-title">{t("diag.agentTitle")}</h2>
+            <p className="section-desc">{t("diag.agentDesc")}</p>
+          </div>
+          <div className="toolbar-group">
+            <button
+              type="button"
+              className="btn btn-sm btn-outline"
+              onClick={() => copyText(mcpSnippet)}
+            >
+              <CopyIcon size={12} />
+              <span>{t("diag.copyMcp")}</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => copyText(cliSnippet)}
+            >
+              <CopyIcon size={12} />
+              <span>{t("diag.copyCli")}</span>
+            </button>
+          </div>
+        </div>
+
+        <pre className="code-snippet">{mcpSnippet}</pre>
       </section>
     </div>
   );
