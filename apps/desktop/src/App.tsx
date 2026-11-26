@@ -12,6 +12,7 @@ import {
 } from "./lib/mode";
 import { useTheme, type ThemeMode } from "./lib/theme";
 import { buildTrayTooltip, extractFirstProxyAddress } from "./lib/tray";
+import { IDLE_UPDATE_PROGRESS, isUpdateReadyForReport } from "./lib/update";
 import type {
   Config,
   ConnectionRecord,
@@ -23,8 +24,10 @@ import type {
   PresetInfo,
   ProxyRunMode,
   RuleConfig,
+  StagedUpdateInfo,
   ThroughputPoint,
   UpdateCheckReport,
+  UpdateProgressEvent,
 } from "./lib/types";
 import { ApplicationsView } from "./views/ApplicationsView";
 import { ConnectionsView } from "./views/ConnectionsView";
@@ -87,6 +90,8 @@ export function App() {
   const [updateReport, setUpdateReport] = useState<UpdateCheckReport | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgressEvent>(IDLE_UPDATE_PROGRESS);
+  const [stagedUpdate, setStagedUpdate] = useState<StagedUpdateInfo | null>(null);
 
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
@@ -196,10 +201,99 @@ export function App() {
     [flashNotice, t]
   );
 
+  // Hydrate staged update state, subscribe to live update progress, and report any completed restart update.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void api
+      .getUpdateState()
+      .then((snap) => {
+        setUpdateProgress(snap.progress);
+        setStagedUpdate(snap.staged);
+      })
+      .catch(() => {});
+
+    void api
+      .subscribeUpdateProgress((evt) => {
+        setUpdateProgress(evt);
+        if (evt.stage === "error" && evt.error) {
+          setUpdateError(evt.error);
+        } else if (evt.stage !== "error") {
+          setUpdateError(null);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+
+    void api
+      .takeUpdateOutcome()
+      .then((outcome) => {
+        if (!outcome) return;
+        if (outcome.ok) {
+          flashNotice(t("diag.toastUpdateCompleted", { version: outcome.target_version }), false);
+        } else {
+          flashNotice(
+            t("diag.toastUpdateFailed", { error: outcome.error ?? "unknown error" }),
+            true
+          );
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      unlisten?.();
+    };
+  }, [flashNotice, t]);
+
+  const handleDownloadUpdate = useCallback(async () => {
+    if (!updateReport || !updateReport.update_available) return;
+    setUpdateError(null);
+    try {
+      const staged = await api.downloadUpdate(updateReport);
+      setStagedUpdate(staged);
+      flashNotice(t("diag.toastUpdateReady", { tag: staged.target_tag }), false);
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      if (raw.includes("UPDATE_CANCELLED")) {
+        flashNotice(t("diag.toastUpdateCancelled"), false);
+        return;
+      }
+      setUpdateError(raw);
+      flashNotice(raw, true);
+    }
+  }, [flashNotice, t, updateReport]);
+
+  const handleCancelUpdateDownload = useCallback(async () => {
+    try {
+      await api.cancelUpdateDownload();
+    } catch {
+      // Ignore cancel errors if download already finished.
+    }
+  }, []);
+
+  const handleRestartToUpdate = useCallback(async () => {
+    setUpdateError(null);
+    try {
+      await api.installUpdateAndRestart();
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = formatRuntimeError(raw);
+      setUpdateError(msg);
+      flashNotice(msg, true);
+    }
+  }, [flashNotice, formatRuntimeError]);
+
   // Silent startup update check (throttled to once per 12h, respects general.auto_check_updates).
   useEffect(() => {
     if (!config || startupUpdateCheckedRef.current) return;
     startupUpdateCheckedRef.current = true;
+    const isPreviewUpdate =
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("preview") === "update-available";
+    if (isPreviewUpdate) {
+      void handleCheckUpdates(true);
+      return;
+    }
     if (config.general.auto_check_updates === false) return;
     const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
     let lastChecked = 0;
@@ -552,6 +646,8 @@ export function App() {
 
   const driverReadiness = classifyDriverReadiness(status);
   const showDriverRecoveryBanner = needsDriverRecovery(status);
+  const updateReady = isUpdateReadyForReport(updateProgress, stagedUpdate, updateReport);
+  const updateReadyTag = updateReady ? stagedUpdate?.target_tag ?? updateProgress.tag : null;
 
   return (
     <div className="app-frame">
@@ -560,7 +656,10 @@ export function App() {
         status={status}
         firstProxyAddress={firstProxyAddress}
         updateAvailableTag={updateReport?.update_available ? updateReport.latest_tag : null}
+        updateProgress={updateProgress}
+        updateReadyTag={updateReadyTag}
         onOpenUpdates={() => setActiveTab("diagnostics")}
+        onRestartToUpdate={() => void handleRestartToUpdate()}
         onRefresh={() => void refreshAll()}
       />
 
@@ -682,8 +781,13 @@ export function App() {
                 updateReport={updateReport}
                 checkingUpdates={checkingUpdates}
                 updateError={updateError}
+                updateProgress={updateProgress}
+                stagedUpdate={stagedUpdate}
                 onSelectMode={(target) => void handleSelectMode(target)}
                 onCheckUpdates={() => void handleCheckUpdates(false)}
+                onDownloadUpdate={() => void handleDownloadUpdate()}
+                onCancelUpdateDownload={() => void handleCancelUpdateDownload()}
+                onRestartToUpdate={() => void handleRestartToUpdate()}
                 onSaveConfig={handleSaveConfig}
                 onRefreshStatus={refreshAll}
                 onNotify={(msg, isErr) => flashNotice(msg, Boolean(isErr))}

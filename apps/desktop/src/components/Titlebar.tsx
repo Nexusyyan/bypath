@@ -17,14 +17,18 @@ import { isTauriRuntime } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { deriveRunMode } from "../lib/mode";
 import { useTheme } from "../lib/theme";
-import type { DaemonStatus } from "../lib/types";
+import { clampPercent, isUpdateDownloadingOrStaging } from "../lib/update";
+import type { DaemonStatus, UpdateProgressEvent } from "../lib/types";
 
 interface TitlebarProps {
   sectionLabel: string;
   status: DaemonStatus | null;
   firstProxyAddress: string | null;
   updateAvailableTag: string | null;
+  updateProgress: UpdateProgressEvent;
+  updateReadyTag: string | null;
   onOpenUpdates: () => void;
+  onRestartToUpdate: () => void;
   onRefresh: () => void;
 }
 
@@ -33,7 +37,10 @@ export function Titlebar({
   status,
   firstProxyAddress,
   updateAvailableTag,
+  updateProgress,
+  updateReadyTag,
   onOpenUpdates,
+  onRestartToUpdate,
   onRefresh,
 }: TitlebarProps) {
   const { locale, toggleLocale, t } = useI18n();
@@ -107,17 +114,57 @@ export function Titlebar({
           </span>
         </span>
 
-        {updateAvailableTag && (
+        {updateProgress.stage === "applying" ? (
+          <button
+            type="button"
+            className="titlebar-pill-btn titlebar-update-pill ready"
+            disabled
+          >
+            <RefreshIcon size={12} />
+            <span>{t("topbar.restartingToUpdate")}</span>
+          </button>
+        ) : updateReadyTag ? (
+          <button
+            type="button"
+            className="titlebar-pill-btn titlebar-update-pill ready"
+            title={t("topbar.restartToUpdateTitle", { tag: updateReadyTag })}
+            aria-label={t("topbar.restartToUpdateTitle", { tag: updateReadyTag })}
+            onClick={onRestartToUpdate}
+          >
+            <RefreshIcon size={12} />
+            <span>{t("topbar.restartToUpdate")}</span>
+          </button>
+        ) : isUpdateDownloadingOrStaging(updateProgress.stage) ? (
           <button
             type="button"
             className="titlebar-pill-btn titlebar-update-pill"
-            title={t("topbar.updateAvailable", { tag: updateAvailableTag })}
-            aria-label={t("topbar.updateAvailable", { tag: updateAvailableTag })}
+            title={t("topbar.updateAvailable", { tag: updateProgress.tag || updateAvailableTag || "" })}
             onClick={onOpenUpdates}
           >
-            <ArrowUpRightIcon size={12} />
-            <span>{updateAvailableTag}</span>
+            <RefreshIcon size={12} />
+            <span>
+              {updateProgress.stage === "verifying"
+                ? t("topbar.verifyingUpdate")
+                : updateProgress.stage === "extracting"
+                  ? t("topbar.preparingUpdate")
+                  : t("topbar.updatingProgress", {
+                      percent: clampPercent(updateProgress.percent),
+                    })}
+            </span>
           </button>
+        ) : (
+          updateAvailableTag && (
+            <button
+              type="button"
+              className="titlebar-pill-btn titlebar-update-pill"
+              title={t("topbar.updateAvailable", { tag: updateAvailableTag })}
+              aria-label={t("topbar.updateAvailable", { tag: updateAvailableTag })}
+              onClick={onOpenUpdates}
+            >
+              <ArrowUpRightIcon size={12} />
+              <span>{updateAvailableTag}</span>
+            </button>
+          )
         )}
 
         <button

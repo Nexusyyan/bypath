@@ -19,11 +19,16 @@ import type {
   RuleTestReport,
   ServiceStateSummary,
   SetRunModeResult,
+  StagedUpdateInfo,
   SystemProxyInfo,
   TrayStatePayload,
   UiPrefsSyncPayload,
   UpdateCheckReport,
+  UpdateOutcomeRecord,
+  UpdateProgressEvent,
+  UpdateStateSnapshot,
 } from "./types";
+import { IDLE_UPDATE_PROGRESS } from "./update";
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -178,6 +183,17 @@ let previewServiceInstalled = previewScenario !== "fresh";
 let previewServiceRunning =
   previewScenario !== "standard-stopped" && previewScenario !== "fresh";
 let previewLaunchAtLogin = false;
+let previewUpdateProgress: UpdateProgressEvent = { ...IDLE_UPDATE_PROGRESS };
+let previewStagedUpdate: StagedUpdateInfo | null = null;
+let previewUpdateCancelled = false;
+const previewUpdateListeners = new Set<(evt: UpdateProgressEvent) => void>();
+
+function emitPreviewUpdateProgress(evt: UpdateProgressEvent) {
+  previewUpdateProgress = evt;
+  for (const fn of previewUpdateListeners) {
+    fn(evt);
+  }
+}
 const now = Date.now();
 let previewConnections: ConnectionRecord[] = [
   {
@@ -609,12 +625,41 @@ export const api = {
     if (isTauriRuntime()) {
       return invoke<UpdateCheckReport>("check_for_updates");
     }
+    if (previewScenario === "update-available") {
+      return {
+        current_version: "0.4.3",
+        latest_version: "0.4.4",
+        latest_tag: "v0.4.4",
+        update_available: true,
+        release_name: "Bypath v0.4.4",
+        release_url: "https://github.com/Nexusyyan/bypath/releases/tag/v0.4.4",
+        published_at: new Date().toISOString(),
+        release_notes:
+          "## Highlights\n- In-app one-click update with SHA-256 verification\n- Seamless Restart to Update with automatic BypathService recovery",
+        primary_asset_name: "bypath-v0.4.4-windows-x64.zip",
+        primary_asset_url:
+          "https://github.com/Nexusyyan/bypath/releases/download/v0.4.4/bypath-v0.4.4-windows-x64.zip",
+        primary_asset_size: 8_420_000,
+        nodriver_asset_name: "bypath-v0.4.4-windows-x64-nodriver.zip",
+        nodriver_asset_url:
+          "https://github.com/Nexusyyan/bypath/releases/download/v0.4.4/bypath-v0.4.4-windows-x64-nodriver.zip",
+        nodriver_asset_size: 8_120_000,
+        gui_exe_asset_name: "bypath-gui-v0.4.4-windows-x64.exe",
+        gui_exe_asset_url:
+          "https://github.com/Nexusyyan/bypath/releases/download/v0.4.4/bypath-gui-v0.4.4-windows-x64.exe",
+        gui_exe_asset_size: 4_300_000,
+        checksums_asset_url:
+          "https://github.com/Nexusyyan/bypath/releases/download/v0.4.4/SHA256SUMS.txt",
+        checked_via: "proxy:local_socks",
+        checked_at_ms: Date.now(),
+      };
+    }
     return {
-      current_version: "0.4.2",
-      latest_version: "0.4.2",
-      latest_tag: "v0.4.2",
+      current_version: "0.4.3",
+      latest_version: "0.4.3",
+      latest_tag: "v0.4.3",
       update_available: false,
-      release_name: "Bypath v0.4.2",
+      release_name: "Bypath v0.4.3",
       release_url: "https://github.com/Nexusyyan/bypath/releases",
       published_at: new Date().toISOString(),
       release_notes: null,
@@ -623,8 +668,146 @@ export const api = {
       primary_asset_size: null,
       nodriver_asset_name: null,
       nodriver_asset_url: null,
+      nodriver_asset_size: null,
+      gui_exe_asset_name: null,
+      gui_exe_asset_url: null,
+      gui_exe_asset_size: null,
+      checksums_asset_url: null,
       checked_via: "preview",
       checked_at_ms: Date.now(),
+    };
+  },
+
+  async getUpdateState(): Promise<UpdateStateSnapshot> {
+    if (isTauriRuntime()) {
+      return invoke<UpdateStateSnapshot>("get_update_state");
+    }
+    return {
+      progress: { ...previewUpdateProgress },
+      staged: previewStagedUpdate ? { ...previewStagedUpdate } : null,
+    };
+  },
+
+  async downloadUpdate(report: UpdateCheckReport): Promise<StagedUpdateInfo> {
+    if (isTauriRuntime()) {
+      return invoke<StagedUpdateInfo>("download_update", { report });
+    }
+    previewUpdateCancelled = false;
+    const total = report.nodriver_asset_size ?? report.primary_asset_size ?? 8_120_000;
+    const assetName =
+      report.nodriver_asset_name ?? report.primary_asset_name ?? "bypath-update.zip";
+    for (const pct of [18, 46, 74, 100]) {
+      await new Promise((r) => window.setTimeout(r, 180));
+      if (previewUpdateCancelled) {
+        emitPreviewUpdateProgress({ ...IDLE_UPDATE_PROGRESS });
+        throw new Error("UPDATE_CANCELLED");
+      }
+      emitPreviewUpdateProgress({
+        stage: "downloading",
+        version: report.latest_version,
+        tag: report.latest_tag,
+        asset_name: assetName,
+        downloaded_bytes: Math.round((total * pct) / 100),
+        total_bytes: total,
+        percent: pct,
+        route: report.checked_via,
+        error: null,
+      });
+    }
+    emitPreviewUpdateProgress({
+      stage: "verifying",
+      version: report.latest_version,
+      tag: report.latest_tag,
+      asset_name: assetName,
+      downloaded_bytes: total,
+      total_bytes: total,
+      percent: 100,
+      route: report.checked_via,
+      error: null,
+    });
+    await new Promise((r) => window.setTimeout(r, 220));
+    emitPreviewUpdateProgress({
+      stage: "extracting",
+      version: report.latest_version,
+      tag: report.latest_tag,
+      asset_name: assetName,
+      downloaded_bytes: total,
+      total_bytes: total,
+      percent: 100,
+      route: report.checked_via,
+      error: null,
+    });
+    await new Promise((r) => window.setTimeout(r, 220));
+    const staged: StagedUpdateInfo = {
+      target_version: report.latest_version,
+      target_tag: report.latest_tag,
+      asset_name: assetName,
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      downloaded_via: report.checked_via,
+      staged_at_ms: Date.now(),
+    };
+    previewStagedUpdate = staged;
+    emitPreviewUpdateProgress({
+      stage: "ready",
+      version: report.latest_version,
+      tag: report.latest_tag,
+      asset_name: assetName,
+      downloaded_bytes: total,
+      total_bytes: total,
+      percent: 100,
+      route: report.checked_via,
+      error: null,
+    });
+    return staged;
+  },
+
+  async cancelUpdateDownload(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("cancel_update_download");
+      return;
+    }
+    previewUpdateCancelled = true;
+  },
+
+  async installUpdateAndRestart(): Promise<boolean> {
+    if (isTauriRuntime()) {
+      return invoke<boolean>("install_update_and_restart");
+    }
+    if (!previewStagedUpdate) {
+      throw new Error("No downloaded update is ready to install");
+    }
+    emitPreviewUpdateProgress({
+      stage: "applying",
+      version: previewStagedUpdate.target_version,
+      tag: previewStagedUpdate.target_tag,
+      asset_name: previewStagedUpdate.asset_name,
+      downloaded_bytes: 0,
+      total_bytes: null,
+      percent: 100,
+      route: previewStagedUpdate.downloaded_via,
+      error: null,
+    });
+    return true;
+  },
+
+  async takeUpdateOutcome(): Promise<UpdateOutcomeRecord | null> {
+    if (isTauriRuntime()) {
+      return invoke<UpdateOutcomeRecord | null>("take_update_outcome");
+    }
+    return null;
+  },
+
+  async subscribeUpdateProgress(
+    onProgress: (evt: UpdateProgressEvent) => void
+  ): Promise<UnlistenFn> {
+    if (isTauriRuntime()) {
+      return listen<UpdateProgressEvent>("bypath://update-progress", (e) => {
+        onProgress(e.payload);
+      });
+    }
+    previewUpdateListeners.add(onProgress);
+    return () => {
+      previewUpdateListeners.delete(onProgress);
     };
   },
 

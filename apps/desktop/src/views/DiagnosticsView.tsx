@@ -8,7 +8,7 @@ import {
   UploadIcon,
 } from "../components/Icons";
 import { api } from "../lib/api";
-import { formatTime } from "../lib/format";
+import { formatBytes, formatTime } from "../lib/format";
 import { useI18n } from "../lib/i18n";
 import {
   classifyDoctorDriverReadiness,
@@ -16,6 +16,13 @@ import {
   deriveRunMode,
 } from "../lib/mode";
 import { useTheme, type ThemeMode } from "../lib/theme";
+import {
+  canAutoInstallReport,
+  clampPercent,
+  isUpdateBusy,
+  isUpdateDownloadingOrStaging,
+  isUpdateReadyForReport,
+} from "../lib/update";
 import {
   APP_VERSION,
   type AgentInfo,
@@ -25,7 +32,9 @@ import {
   type LogEntry,
   type ProxyRunMode,
   type ServiceStateSummary,
+  type StagedUpdateInfo,
   type UpdateCheckReport,
+  type UpdateProgressEvent,
 } from "../lib/types";
 
 interface DiagnosticsViewProps {
@@ -38,8 +47,13 @@ interface DiagnosticsViewProps {
   updateReport: UpdateCheckReport | null;
   checkingUpdates: boolean;
   updateError: string | null;
+  updateProgress: UpdateProgressEvent;
+  stagedUpdate: StagedUpdateInfo | null;
   onSelectMode: (target: ProxyRunMode) => void;
   onCheckUpdates: () => void;
+  onDownloadUpdate: () => void;
+  onCancelUpdateDownload: () => void;
+  onRestartToUpdate: () => void;
   onSaveConfig: (next: Config, toast?: string) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
   onNotify: (message: string, isError?: boolean) => void;
@@ -59,8 +73,13 @@ export function DiagnosticsView({
   updateReport,
   checkingUpdates,
   updateError,
+  updateProgress,
+  stagedUpdate,
   onSelectMode,
   onCheckUpdates,
+  onDownloadUpdate,
+  onCancelUpdateDownload,
+  onRestartToUpdate,
   onSaveConfig,
   onRefreshStatus,
   onNotify,
@@ -609,124 +628,244 @@ export function DiagnosticsView({
       </section>
 
       <section>
-        <div className="section-head">
-          <div>
-            <h2 className="section-title">{t("diag.updatesTitle")}</h2>
-            <p className="section-desc">{t("diag.updatesDesc")}</p>
-          </div>
-          <button
-            type="button"
-            className="btn btn-sm btn-outline"
-            disabled={checkingUpdates}
-            onClick={onCheckUpdates}
-          >
-            <RefreshIcon size={13} />
-            <span>{checkingUpdates ? t("diag.checkingUpdates") : t("diag.checkUpdates")}</span>
-          </button>
-        </div>
+        {(() => {
+          const updateBusy = isUpdateBusy(updateProgress.stage);
+          const updateDownloading = isUpdateDownloadingOrStaging(updateProgress.stage);
+          const updateReady = isUpdateReadyForReport(updateProgress, stagedUpdate, updateReport);
+          const updateApplying = updateProgress.stage === "applying";
+          const canInstallInApp = canAutoInstallReport(updateReport);
+          const displayPercent = clampPercent(updateProgress.percent);
+          const readyTag = stagedUpdate?.target_tag ?? updateProgress.tag;
 
-        <div className="row-list">
-          <div className="row-item">
-            <div className="row-item-main">
-              <div className="row-item-title">
-                <span
-                  className={`dot ${
-                    updateError
-                      ? "dot-err"
-                      : updateReport?.update_available
-                        ? "dot-warn"
-                        : updateReport
-                          ? "dot-ok"
-                          : "dot-idle"
-                  }`}
-                />
-                <span>
-                  {t("diag.versionLabel", {
-                    version: updateReport?.current_version ?? APP_VERSION,
-                  })}
-                </span>
-                {updateReport && (
-                  <span className="tag tag-mono">
-                    {updateReport.update_available
-                      ? t("diag.updateTagNew", { tag: updateReport.latest_tag })
-                      : t("diag.updateTagLatest")}
-                  </span>
-                )}
-              </div>
-              <div className="row-item-sub">
-                {updateError
-                  ? updateError
-                  : updateReport
-                    ? updateReport.update_available
-                      ? updateReport.published_at
-                        ? t("diag.updateFoundDated", {
-                            latest: updateReport.latest_tag,
-                            date: updateReport.published_at.slice(0, 10),
-                            via: updateReport.checked_via,
-                          })
-                        : t("diag.updateFound", {
-                            latest: updateReport.latest_tag,
-                            via: updateReport.checked_via,
-                          })
-                      : t("diag.updateUpToDate", {
-                          latest: updateReport.latest_tag,
-                          via: updateReport.checked_via,
-                        })
-                    : t("diag.updateIdle")}
-              </div>
-            </div>
-
-            <div className="row-item-actions">
-              {updateReport?.update_available ? (
-                <>
-                  {updateReport.primary_asset_url && (
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-primary"
-                      onClick={() =>
-                        void api.openExternalUrl(updateReport.primary_asset_url!).catch((e) =>
-                          onNotify(e instanceof Error ? e.message : String(e), true)
-                        )
-                      }
-                    >
-                      <DownloadIcon size={12} />
-                      <span>{t("diag.downloadZip")}</span>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-outline"
-                    onClick={() =>
-                      void api.openExternalUrl(updateReport.release_url).catch((e) =>
-                        onNotify(e instanceof Error ? e.message : String(e), true)
-                      )
-                    }
-                  >
-                    <ArrowUpRightIcon size={12} />
-                    <span>{t("diag.releaseNotes")}</span>
-                  </button>
-                </>
-              ) : (
+          return (
+            <>
+              <div className="section-head">
+                <div>
+                  <h2 className="section-title">{t("diag.updatesTitle")}</h2>
+                  <p className="section-desc">{t("diag.updatesDesc")}</p>
+                </div>
                 <button
                   type="button"
-                  className="btn btn-sm btn-ghost"
-                  onClick={() =>
-                    void api
-                      .openExternalUrl(updateReport?.release_url ?? RELEASES_FALLBACK_URL)
-                      .catch((e) => onNotify(e instanceof Error ? e.message : String(e), true))
-                  }
+                  className="btn btn-sm btn-outline"
+                  disabled={checkingUpdates || updateBusy}
+                  onClick={onCheckUpdates}
                 >
-                  <ArrowUpRightIcon size={12} />
-                  <span>{t("diag.openReleases")}</span>
+                  <RefreshIcon size={13} />
+                  <span>
+                    {checkingUpdates ? t("diag.checkingUpdates") : t("diag.checkUpdates")}
+                  </span>
                 </button>
-              )}
-            </div>
-          </div>
+              </div>
 
-          {updateReport?.update_available && updateReport.release_notes && (
-            <pre className="update-notes">{updateReport.release_notes}</pre>
-          )}
-        </div>
+              <div className="row-list">
+                <div className="row-item">
+                  <div className="row-item-main">
+                    <div className="row-item-title">
+                      <span
+                        className={`dot ${
+                          updateError
+                            ? "dot-err"
+                            : updateReady
+                              ? "dot-ok"
+                              : updateReport?.update_available
+                                ? "dot-warn"
+                                : updateReport
+                                  ? "dot-ok"
+                                  : "dot-idle"
+                        }`}
+                      />
+                      <span>
+                        {t("diag.versionLabel", {
+                          version: updateReport?.current_version ?? APP_VERSION,
+                        })}
+                      </span>
+                      {updateReady ? (
+                        <span className="tag tag-mono">{t("diag.updateTagReady")}</span>
+                      ) : (
+                        updateReport && (
+                          <span className="tag tag-mono">
+                            {updateReport.update_available
+                              ? t("diag.updateTagNew", { tag: updateReport.latest_tag })
+                              : t("diag.updateTagLatest")}
+                          </span>
+                        )
+                      )}
+                    </div>
+                    <div className="row-item-sub">
+                      {updateError
+                        ? updateError
+                        : updateReady
+                          ? t("diag.updateReadyDesc", { tag: readyTag })
+                          : updateReport
+                            ? updateReport.update_available
+                              ? updateReport.published_at
+                                ? t("diag.updateFoundDated", {
+                                    latest: updateReport.latest_tag,
+                                    date: updateReport.published_at.slice(0, 10),
+                                    via: updateReport.checked_via,
+                                  })
+                                : t("diag.updateFound", {
+                                    latest: updateReport.latest_tag,
+                                    via: updateReport.checked_via,
+                                  })
+                              : t("diag.updateUpToDate", {
+                                  latest: updateReport.latest_tag,
+                                  via: updateReport.checked_via,
+                                })
+                            : t("diag.updateIdle")}
+                    </div>
+                  </div>
+
+                  <div className="row-item-actions">
+                    {updateApplying ? (
+                      <button type="button" className="btn btn-sm btn-primary" disabled>
+                        <RefreshIcon size={12} />
+                        <span>{t("diag.restartingToUpdate")}</span>
+                      </button>
+                    ) : updateReady ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          onClick={onRestartToUpdate}
+                        >
+                          <RefreshIcon size={12} />
+                          <span>{t("diag.restartToUpdate")}</span>
+                        </button>
+                        {updateReport && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline"
+                            onClick={() =>
+                              void api.openExternalUrl(updateReport.release_url).catch((e) =>
+                                onNotify(e instanceof Error ? e.message : String(e), true)
+                              )
+                            }
+                          >
+                            <ArrowUpRightIcon size={12} />
+                            <span>{t("diag.releaseNotes")}</span>
+                          </button>
+                        )}
+                      </>
+                    ) : updateDownloading ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline"
+                        disabled={updateProgress.stage !== "downloading"}
+                        onClick={onCancelUpdateDownload}
+                      >
+                        <span>{t("diag.cancelUpdate")}</span>
+                      </button>
+                    ) : updateReport?.update_available ? (
+                      <>
+                        {canInstallInApp ? (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-primary"
+                            onClick={onDownloadUpdate}
+                          >
+                            <DownloadIcon size={12} />
+                            <span>
+                              {updateError
+                                ? t("diag.retryUpdate")
+                                : t("diag.updateNow", { tag: updateReport.latest_tag })}
+                            </span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-primary"
+                            onClick={() =>
+                              void api.openExternalUrl(updateReport.release_url).catch((e) =>
+                                onNotify(e instanceof Error ? e.message : String(e), true)
+                              )
+                            }
+                          >
+                            <ArrowUpRightIcon size={12} />
+                            <span>{t("diag.openReleases")}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline"
+                          onClick={() =>
+                            void api.openExternalUrl(updateReport.release_url).catch((e) =>
+                              onNotify(e instanceof Error ? e.message : String(e), true)
+                            )
+                          }
+                        >
+                          <ArrowUpRightIcon size={12} />
+                          <span>{t("diag.releaseNotes")}</span>
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost"
+                        onClick={() =>
+                          void api
+                            .openExternalUrl(updateReport?.release_url ?? RELEASES_FALLBACK_URL)
+                            .catch((e) =>
+                              onNotify(e instanceof Error ? e.message : String(e), true)
+                            )
+                        }
+                      >
+                        <ArrowUpRightIcon size={12} />
+                        <span>{t("diag.openReleases")}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {updateDownloading && (
+                  <div className="update-progress-panel" role="status" aria-live="polite">
+                    <div className="update-progress-meta">
+                      <span>
+                        {updateProgress.stage === "verifying"
+                          ? t("diag.updateVerifying")
+                          : updateProgress.stage === "extracting"
+                            ? t("diag.updateExtracting")
+                            : updateProgress.total_bytes
+                              ? t("diag.updateDownloading", {
+                                  asset: updateProgress.asset_name ?? updateProgress.tag,
+                                  downloaded: formatBytes(updateProgress.downloaded_bytes),
+                                  total: formatBytes(updateProgress.total_bytes),
+                                })
+                              : t("diag.updateDownloadingUnknown", {
+                                  asset: updateProgress.asset_name ?? updateProgress.tag,
+                                  downloaded: formatBytes(updateProgress.downloaded_bytes),
+                                })}
+                      </span>
+                      <span className="update-progress-pct">
+                        {updateProgress.stage === "downloading" && updateProgress.total_bytes
+                          ? `${displayPercent}%`
+                          : updateProgress.route ?? ""}
+                      </span>
+                    </div>
+                    <div className="update-progress-track">
+                      <div
+                        className={`update-progress-fill ${
+                          updateProgress.stage !== "downloading" || !updateProgress.total_bytes
+                            ? "indeterminate"
+                            : ""
+                        }`}
+                        style={
+                          updateProgress.stage === "downloading" && updateProgress.total_bytes
+                            ? { width: `${displayPercent}%` }
+                            : undefined
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {updateReport?.update_available && updateReport.release_notes && (
+                  <pre className="update-notes">{updateReport.release_notes}</pre>
+                )}
+              </div>
+            </>
+          );
+        })()}
       </section>
 
       <section>

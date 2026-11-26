@@ -86,6 +86,20 @@ mod win_impl {
         }
     }
 
+    pub fn query_service_executable_path() -> Option<PathBuf> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+        let service = manager
+            .open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG)
+            .ok()?;
+        let cfg = service.query_config().ok()?;
+        if cfg.executable_path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(cfg.executable_path)
+        }
+    }
+
     pub fn install_service(
         daemon_exe: &Path,
         config_path: &Path,
@@ -352,6 +366,10 @@ mod win_impl {
         }
     }
 
+    pub fn query_service_executable_path() -> Option<PathBuf> {
+        None
+    }
+
     pub fn install_service(_: &Path, _: &Path, _: bool) -> Result<()> {
         bail!("Windows Service management is only available on Windows")
     }
@@ -374,6 +392,6 @@ mod win_impl {
 }
 
 pub use win_impl::{
-    install_service, query_service_status, run_as_windows_service, start_service, stop_service,
-    uninstall_service,
+    install_service, query_service_executable_path, query_service_status, run_as_windows_service,
+    start_service, stop_service, uninstall_service,
 };

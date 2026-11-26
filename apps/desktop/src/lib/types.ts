@@ -1,4 +1,4 @@
-export const APP_VERSION = "0.4.2";
+export const APP_VERSION = "0.4.3";
 
 export type BackendMode = "service" | "embedded";
 export type ProxyRunMode = "off" | "foreground" | "background";
@@ -253,8 +253,57 @@ export interface UpdateCheckReport {
   primary_asset_size: number | null;
   nodriver_asset_name: string | null;
   nodriver_asset_url: string | null;
+  nodriver_asset_size?: number | null;
+  gui_exe_asset_name?: string | null;
+  gui_exe_asset_url?: string | null;
+  gui_exe_asset_size?: number | null;
+  checksums_asset_url?: string | null;
   checked_via: string;
   checked_at_ms: number;
+}
+
+export type UpdateStage =
+  | "idle"
+  | "downloading"
+  | "verifying"
+  | "extracting"
+  | "ready"
+  | "applying"
+  | "error";
+
+export interface UpdateProgressEvent {
+  stage: UpdateStage;
+  version: string;
+  tag: string;
+  asset_name: string | null;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  percent: number;
+  route: string | null;
+  error: string | null;
+}
+
+export interface StagedUpdateInfo {
+  target_version: string;
+  target_tag: string;
+  asset_name: string;
+  sha256: string;
+  downloaded_via: string;
+  staged_at_ms: number;
+}
+
+export interface UpdateStateSnapshot {
+  progress: UpdateProgressEvent;
+  staged: StagedUpdateInfo | null;
+}
+
+export interface UpdateOutcomeRecord {
+  ok: boolean;
+  from_version: string;
+  target_version: string;
+  target_tag: string;
+  error: string | null;
+  timestamp_ms: number;
 }
 
 export interface ThroughputPoint {

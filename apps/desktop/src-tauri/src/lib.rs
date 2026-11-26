@@ -1,15 +1,18 @@
+mod updater;
+
 use bypath_core::config::{
     default_config_path, is_portable_mode, resolve_windivert_dir, Config, PresetInfo, ProxyConfig,
 };
 use bypath_core::rules::{RuleTestQuery, RuleTestReport};
 use bypath_core::telemetry::{ConnectionRecord, LogEntry};
 use bypath_core::update::{
-    check_for_updates as core_check_updates, is_safe_release_url, UpdateCheckReport,
+    check_for_updates as core_check_updates, download_and_stage_update, is_safe_release_url,
+    StagedUpdate, UpdateCheckReport, UpdateProgressEvent, CURRENT_VERSION,
 };
 use bypath_core::upstream::system_proxy::SystemProxyInfo;
 use bypath_daemon::{
-    install_service, query_service_status, run_as_windows_service, start_service, stop_service,
-    uninstall_service, DaemonController, ServiceStateSummary,
+    install_service, query_service_executable_path, query_service_status, run_as_windows_service,
+    start_service, stop_service, uninstall_service, DaemonController, ServiceStateSummary,
 };
 use bypath_ipc::{
     BackendMode, ConfigSnapshot, DaemonStatus, DoctorReport, IpcClient, IpcHandler, IpcRequest,
@@ -31,6 +34,8 @@ use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+pub use updater::maybe_run_updater_mode;
+use updater::{ApplyUpdatePlan, UpdateOutcomeRecord};
 
 const TRAY_WINDOW_LABEL: &str = "tray-menu";
 const TRAY_DEFAULT_WIDTH: f64 = 288.0;
@@ -124,6 +129,24 @@ struct AppBackend {
     tray_last_blur: Mutex<Option<Instant>>,
     tray_last_shown: Mutex<Option<Instant>>,
     tray_last_anchor: Mutex<Option<(f64, f64)>>,
+    update_downloading: AtomicBool,
+    update_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    staged_update: Mutex<Option<StagedUpdate>>,
+    update_progress: Mutex<UpdateProgressEvent>,
+}
+
+fn idle_update_progress() -> UpdateProgressEvent {
+    UpdateProgressEvent {
+        stage: "idle".into(),
+        version: String::new(),
+        tag: String::new(),
+        asset_name: None,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        percent: 0,
+        route: None,
+        error: None,
+    }
 }
 
 impl AppBackend {
@@ -148,6 +171,10 @@ impl AppBackend {
             tray_last_blur: Mutex::new(None),
             tray_last_shown: Mutex::new(None),
             tray_last_anchor: Mutex::new(None),
+            update_downloading: AtomicBool::new(false),
+            update_cancel: Mutex::new(None),
+            staged_update: Mutex::new(None),
+            update_progress: Mutex::new(idle_update_progress()),
         })
     }
 
@@ -619,6 +646,42 @@ async fn open_windows_security() -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StagedUpdateInfo {
+    target_version: String,
+    target_tag: String,
+    asset_name: String,
+    sha256: String,
+    downloaded_via: String,
+    staged_at_ms: u64,
+}
+
+impl From<&StagedUpdate> for StagedUpdateInfo {
+    fn from(s: &StagedUpdate) -> Self {
+        Self {
+            target_version: s.target_version.clone(),
+            target_tag: s.target_tag.clone(),
+            asset_name: s.asset_name.clone(),
+            sha256: s.sha256.clone(),
+            downloaded_via: s.downloaded_via.clone(),
+            staged_at_ms: s.staged_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateStateSnapshot {
+    progress: UpdateProgressEvent,
+    staged: Option<StagedUpdateInfo>,
+}
+
+fn emit_update_progress(app: &AppHandle, state: &AppBackend, evt: UpdateProgressEvent) {
+    if let Ok(mut guard) = state.update_progress.lock() {
+        *guard = evt.clone();
+    }
+    let _ = app.emit("bypath://update-progress", &evt);
+}
+
 #[tauri::command]
 async fn check_for_updates(
     state: State<'_, Arc<AppBackend>>,
@@ -630,6 +693,308 @@ async fn check_for_updates(
     core_check_updates(cfg.as_ref(), None, Duration::from_secs(12))
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_update_state(
+    state: State<'_, Arc<AppBackend>>,
+) -> Result<UpdateStateSnapshot, String> {
+    let progress = state
+        .update_progress
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| idle_update_progress());
+    let staged = state
+        .staged_update
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(StagedUpdateInfo::from));
+    Ok(UpdateStateSnapshot { progress, staged })
+}
+
+#[tauri::command]
+async fn download_update(
+    app: AppHandle,
+    state: State<'_, Arc<AppBackend>>,
+    report: UpdateCheckReport,
+) -> Result<StagedUpdateInfo, String> {
+    if !report.update_available {
+        return Err("No newer version is available to download".into());
+    }
+
+    // Reuse an already staged and verified payload for the exact same tag.
+    if let Ok(guard) = state.staged_update.lock() {
+        if let Some(ref existing) = *guard {
+            if existing.target_tag == report.latest_tag
+                && existing.payload_dir.join("bypath-gui.exe").is_file()
+            {
+                let info = StagedUpdateInfo::from(existing);
+                let evt = UpdateProgressEvent {
+                    stage: "ready".into(),
+                    version: existing.target_version.clone(),
+                    tag: existing.target_tag.clone(),
+                    asset_name: Some(existing.asset_name.clone()),
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                    percent: 100,
+                    route: Some(existing.downloaded_via.clone()),
+                    error: None,
+                };
+                drop(guard);
+                emit_update_progress(&app, &state, evt);
+                return Ok(info);
+            }
+        }
+    }
+
+    if state
+        .update_downloading
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("An update download is already in progress".into());
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Ok(mut guard) = state.update_cancel.lock() {
+        *guard = Some(Arc::clone(&cancel));
+    }
+
+    let cfg = match state.dispatch(IpcRequest::GetConfig).await {
+        Ok(IpcResponse::Config { snapshot }) => Some(snapshot.config),
+        _ => None,
+    };
+    let wd_dir = resolve_windivert_dir(cfg.as_ref().map(|c| c.general.windivert_dir.as_str()));
+    let has_local_windivert =
+        wd_dir.join("WinDivert.dll").is_file() && wd_dir.join("WinDivert64.sys").is_file();
+
+    let staging_parent = updater::updater_temp_root();
+    let app_for_cb = app.clone();
+    let backend_for_cb = Arc::clone(state.inner());
+
+    let res = download_and_stage_update(
+        &report,
+        cfg.as_ref(),
+        has_local_windivert,
+        &staging_parent,
+        Arc::clone(&cancel),
+        move |evt| {
+            emit_update_progress(&app_for_cb, &backend_for_cb, evt);
+        },
+    )
+    .await;
+
+    state.update_downloading.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = state.update_cancel.lock() {
+        *guard = None;
+    }
+
+    match res {
+        Ok(staged) => {
+            let info = StagedUpdateInfo::from(&staged);
+            let old_root = state
+                .staged_update
+                .lock()
+                .ok()
+                .and_then(|mut g| g.replace(staged))
+                .map(|old| old.staging_root);
+            if let Some(old_dir) = old_root {
+                let _ = std::fs::remove_dir_all(old_dir);
+            }
+            Ok(info)
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("UPDATE_CANCELLED") {
+                emit_update_progress(&app, &state, idle_update_progress());
+                return Err("UPDATE_CANCELLED".into());
+            }
+            emit_update_progress(
+                &app,
+                &state,
+                UpdateProgressEvent {
+                    stage: "error".into(),
+                    version: report.latest_version,
+                    tag: report.latest_tag,
+                    asset_name: None,
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                    percent: 0,
+                    route: None,
+                    error: Some(msg.clone()),
+                },
+            );
+            Err(msg)
+        }
+    }
+}
+
+#[tauri::command]
+async fn cancel_update_download(state: State<'_, Arc<AppBackend>>) -> Result<(), String> {
+    if let Ok(guard) = state.update_cancel.lock() {
+        if let Some(ref flag) = *guard {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn install_update_and_restart(
+    app: AppHandle,
+    state: State<'_, Arc<AppBackend>>,
+) -> Result<bool, String> {
+    let staged = state
+        .staged_update
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| "No downloaded update is ready to install".to_string())?;
+
+    if !staged.payload_dir.join("bypath-gui.exe").is_file() {
+        return Err("Staged update files are missing; please download the update again".into());
+    }
+
+    let current_gui_exe = std::env::current_exe()
+        .map_err(|e| format!("failed to resolve current executable path: {e}"))?;
+    let install_dir = current_gui_exe
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "failed to resolve installation directory".to_string())?;
+
+    let svc_state = query_service_status();
+    let service_exe = query_service_executable_path();
+    let payload_has_daemon = staged.payload_dir.join("bypath-daemon.exe").is_file();
+
+    let service_uses_gui = service_exe
+        .as_ref()
+        .map(|p| {
+            p.to_string_lossy()
+                .eq_ignore_ascii_case(&current_gui_exe.to_string_lossy())
+        })
+        .unwrap_or(false);
+
+    let daemon_target_exe = if let Some(ref svc_path) = service_exe {
+        let is_daemon_bin = svc_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("bypath-daemon.exe"))
+            .unwrap_or(false);
+        if is_daemon_bin && payload_has_daemon {
+            Some(svc_path.clone())
+        } else if !service_uses_gui && install_dir.join("bypath-daemon.exe").is_file() {
+            Some(install_dir.join("bypath-daemon.exe"))
+        } else {
+            None
+        }
+    } else if install_dir.join("bypath-daemon.exe").is_file() {
+        Some(install_dir.join("bypath-daemon.exe"))
+    } else {
+        None
+    };
+
+    let cli_target_exe = if install_dir.join("bypath.exe").is_file() {
+        Some(install_dir.join("bypath.exe"))
+    } else if let Some(ref d_exe) = daemon_target_exe {
+        d_exe
+            .parent()
+            .map(|p| p.join("bypath.exe"))
+            .filter(|p| p.is_file())
+    } else {
+        None
+    };
+
+    let service_binary_affected = svc_state.running
+        && (service_uses_gui || (daemon_target_exe.is_some() && payload_has_daemon));
+
+    let service_engine_was_running = if service_binary_affected {
+        match state.ipc.request(&IpcRequest::GetStatus).await {
+            Ok(IpcResponse::Status { status }) => status.engine_running,
+            _ => false,
+        }
+    } else {
+        false
+    };
+
+    let restore_foreground =
+        state.current_backend() == BackendMode::Embedded && state.embedded.is_engine_running();
+
+    let plan = ApplyUpdatePlan {
+        parent_pid: std::process::id(),
+        from_version: CURRENT_VERSION.to_string(),
+        target_version: staged.target_version.clone(),
+        target_tag: staged.target_tag.clone(),
+        install_dir: install_dir.clone(),
+        current_gui_exe,
+        staging_payload_dir: staged.payload_dir.clone(),
+        staging_root_to_clean: staged.staging_root.clone(),
+        daemon_target_exe,
+        cli_target_exe,
+        update_bundle_extras: updater::is_bundle_install_dir(&install_dir),
+        service_was_running: service_binary_affected,
+        service_engine_was_running,
+        restore_foreground,
+        relaunch_unelevated: !is_elevated() && !restore_foreground,
+        result_file: updater::outcome_file_path(),
+        log_file: updater::log_file_path(),
+    };
+
+    emit_update_progress(
+        &app,
+        &state,
+        UpdateProgressEvent {
+            stage: "applying".into(),
+            version: staged.target_version.clone(),
+            tag: staged.target_tag.clone(),
+            asset_name: Some(staged.asset_name.clone()),
+            downloaded_bytes: 0,
+            total_bytes: None,
+            percent: 100,
+            route: Some(staged.downloaded_via.clone()),
+            error: None,
+        },
+    );
+
+    if let Err(err) = updater::spawn_updater_helper(&plan) {
+        // Restore ready state cleanly if the user cancelled UAC or spawn failed.
+        emit_update_progress(
+            &app,
+            &state,
+            UpdateProgressEvent {
+                stage: "ready".into(),
+                version: staged.target_version,
+                tag: staged.target_tag,
+                asset_name: Some(staged.asset_name),
+                downloaded_bytes: 0,
+                total_bytes: None,
+                percent: 100,
+                route: Some(staged.downloaded_via),
+                error: None,
+            },
+        );
+        return Err(err);
+    }
+
+    let app_clone = app.clone();
+    let backend_clone = Arc::clone(state.inner());
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        backend_clone.allow_exit.store(true, Ordering::SeqCst);
+        hide_tray_window(&app_clone);
+        if let Some(win) = app_clone.get_webview_window("main") {
+            let _ = win.hide();
+        }
+        #[cfg(windows)]
+        backend_clone.release_single_instance();
+        app_clone.exit(0);
+    });
+
+    Ok(true)
+}
+
+#[tauri::command]
+async fn take_update_outcome() -> Result<Option<UpdateOutcomeRecord>, String> {
+    Ok(updater::take_last_update_outcome())
 }
 
 #[tauri::command]
@@ -1669,6 +2034,36 @@ pub fn run_with_args(args: &[String]) {
             }
             spawn_event_forwarder(handle.clone(), Arc::clone(&backend));
 
+            if !audit_instance {
+                let backend_for_cleanup = Arc::clone(&backend);
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    let busy = backend_for_cleanup
+                        .update_downloading
+                        .load(Ordering::Relaxed)
+                        || backend_for_cleanup
+                            .staged_update
+                            .lock()
+                            .ok()
+                            .map(|g| g.is_some())
+                            .unwrap_or(false);
+                    if !busy {
+                        let mut extra_dirs = Vec::new();
+                        if let Ok(exe) = std::env::current_exe() {
+                            if let Some(dir) = exe.parent() {
+                                extra_dirs.push(dir.to_path_buf());
+                            }
+                        }
+                        if let Some(svc_exe) = query_service_executable_path() {
+                            if let Some(dir) = svc_exe.parent() {
+                                extra_dirs.push(dir.to_path_buf());
+                            }
+                        }
+                        updater::cleanup_stale_updater_artifacts(&extra_dirs);
+                    }
+                });
+            }
+
             if start_foreground {
                 let bg = Arc::clone(&backend);
                 let h = handle.clone();
@@ -1756,6 +2151,11 @@ pub fn run_with_args(args: &[String]) {
             open_path_in_explorer,
             open_windows_security,
             check_for_updates,
+            get_update_state,
+            download_update,
+            cancel_update_download,
+            install_update_and_restart,
+            take_update_outcome,
             open_external_url,
             pick_directory,
             get_launch_at_login,
