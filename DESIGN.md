@@ -63,16 +63,17 @@ Pure charcoal neutrals with zero blue cast and crisp hairline separation:
   - Controls (buttons, inputs, nav pills, segmented tabs, process tabs, domain chips, pagination buttons): `8px` (`--radius-sm`) and `10px` (`--radius-md`)
   - Panels, table frames, preset cards, readiness card, inline composers: `14px` (`--radius-lg`) and `16px` (`--radius-xl`)
   - Status dots, process count badges, and switches: `999px` (`--radius-pill`)
-- **Spacing**: `4px` base unit (`4, 8, 12, 16, 20, 24, 32`). Unified L-frame (`44px` custom titlebar + `228px` sidebar) cradling the main canvas (`14px` top-left radius).
+- **Spacing**: `4px` base unit (`4, 8, 12, 16, 20, 24, 32`). Unified L-frame (`44px` custom titlebar + `240px` sidebar) cradling the main canvas (`14px` top-left radius).
 
 ## Key Surface Patterns
 
-- **Readiness Card**: Quiet onboarding card displayed at the top of the main canvas only when WinDivert driver, background service authorization, or upstream proxy needs attention; vanishes automatically once ready.
+- **3-Way Run Mode Switcher (`Off | Foreground | Background`)**: Focal segmented radiogroup at the top of the sidebar and inside the system tray popover with concentric `7px` inner segments inside a `10px` track. `Off` rests quietly on `--surface-canvas` with a hairline ring; `Foreground` (in-app local engine) and `Background` (persistent `BypathService`) light up in solid `--ink-primary` with a `6px` `--status-ok` live dot. One click handles automatic UAC elevation handoff (Foreground) or service install/start + pipe readiness (Background).
+- **Run Modes Cards & Quiet Recovery Banner**: Top of Diagnostics presents side-by-side Foreground Mode and Background Service Mode cards with clear privilege/lifecycle separation and tucked secondary service lifecycle actions (`Stop Service`, `Uninstall Service`). A compact error recovery banner appears only when WinDivert files are genuinely missing or blocked by Windows Security (never on healthy standard-user standby).
 - **Telemetry Strip + Inline Sparklines**: 4-column flat readout bar with subtle monochrome 60-second SVG throughput polylines inside Upload/Download cells.
 - **Process Tabs + Detail/Summary Switch + Integrated Pagination**: Persistent state across tab switches, clickable sortable headers, per-process/domain traffic aggregation view, expanded-row quick actions (Copy, Direct Bypass, Block/Unblock), and bottom `#F9F9FA` / `#111113` pagination bar.
 - **Priority Rules + Dry-Run Tester**: Numbered `#1..#N` rules with up/down reordering, inline create/edit form with collapsible L4 advanced criteria, and instant Phase 1/Phase 2 dry-run match tester.
 - **Live Daemon Logs & Agent DIY Card**: Filterable monochrome monospace log feed and one-click copyable `bypath mcp` / `bypath ctl --json` integration card inside Diagnostics.
-- **Custom System Tray Popover (`tray-menu`)**: Frameless transparent Tauri popup window (`264px` rounded card inside a `10px` transparent shadow frame, `14px` outer radius with `6px` section padding and concentric `8px` interactive rows) replacing the native Win32 right-click menu. Features live engine status and tabular throughput readout, one-click Start/Stop toggle, direct workspace tab jumps, instant cross-window Light/Dark/System theme and `zh-CN`/`en` locale toggles, and hover-reveal Quit action.
+- **Custom System Tray Popover (`tray-menu`)**: Frameless transparent Tauri popup window (`264px` rounded card inside a `10px` transparent shadow frame, `14px` outer radius with `6px` section padding and concentric `8px` interactive rows) replacing the native Win32 right-click menu. Features live mode badge and tabular throughput readout, one-click 3-way `Off | Foreground | Background` switcher, direct workspace tab jumps, instant cross-window Light/Dark/System theme and `zh-CN`/`en` locale toggles, and hover-reveal Quit action.
 
 ## Typography & Iconography
 

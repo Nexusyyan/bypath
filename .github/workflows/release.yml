@@ -161,7 +161,7 @@ jobs:
             ### Quick Start (Recommended Out-of-the-Box Bundle)
             1. Download and extract **`bypath-${{ steps.meta.outputs.tag }}-windows-x64.zip`** (includes official SHA-256 & Authenticode verified `WinDivert.dll` + `WinDivert64.sys` under `runtime/windivert/` with full LGPLv3 notices).
             2. Double-click **`bypath-gui.exe`**.
-            3. Edit your upstream proxy address if needed (e.g. `127.0.0.1:7897` or `127.0.0.1:10808`), click **Authorize & Start Service** once, toggle your apps (such as Antigravity), and click **Start Proxying**.
+            3. Edit your upstream proxy address if needed (e.g. `127.0.0.1:7897` or `127.0.0.1:10808`), toggle your apps (such as Antigravity), and switch directly between **Off**, **Foreground** (in-app with automatic UAC elevation), and **Background** (`BypathService` persistent mode with zero daily UAC) from the sidebar or system tray popover. Optional **Launch at Windows Startup** (off by default) can be toggled in Diagnostics.
 
             ### Clean No-Driver Bundle
             If your antivirus flags kernel packet drivers in ZIP archives, download **`bypath-${{ steps.meta.outputs.tag }}-windows-x64-nodriver.zip`** and run `.\scripts\fetch-windivert.ps1` (or locate your own `WinDivert.dll` + `WinDivert64.sys` from Diagnostics).

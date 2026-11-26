@@ -5,5 +5,5 @@ fn main() {
     if let Some(code) = bypath_desktop_lib::maybe_run_service_mode(&args) {
         std::process::exit(code);
     }
-    bypath_desktop_lib::run();
+    bypath_desktop_lib::run_with_args(&args);
 }

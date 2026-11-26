@@ -96,6 +96,7 @@ describe("tray summary and tooltip helpers", () => {
 
     const summary = buildTraySummary(sampleStatus, sampleConfig);
     expect(summary.running).toBe(true);
+    expect(summary.runMode).toBe("background");
     expect(summary.proxyAddress).toBe("127.0.0.1:10808");
     expect(summary.activeConnections).toBe(4);
     expect(summary.enabledRules).toBe(1);
@@ -105,16 +106,36 @@ describe("tray summary and tooltip helpers", () => {
     expect(summary.isServiceMode).toBe(true);
   });
 
-  it("flags attention when driver or privilege readiness is missing", () => {
+  it("does not flag false attention for standard-user standby when driver files exist", () => {
+    const standardStandby: DaemonStatus = {
+      ...sampleStatus,
+      backend_mode: "embedded",
+      engine_running: false,
+      windivert_ready: false,
+      windivert_dll_path: "runtime\\windivert\\WinDivert.dll",
+      windivert_error_kind: "access_denied",
+      service_running: false,
+      elevated: false,
+    };
+    const summary = buildTraySummary(standardStandby, sampleConfig);
+    expect(summary.running).toBe(false);
+    expect(summary.runMode).toBe("off");
+    expect(summary.needsAttention).toBe(false);
+  });
+
+  it("flags attention when driver files are genuinely missing or blocked", () => {
     const degraded: DaemonStatus = {
       ...sampleStatus,
       engine_running: false,
       windivert_ready: false,
+      windivert_dll_path: null,
+      windivert_error_kind: "missing_dll",
       service_running: false,
       elevated: false,
     };
     const summary = buildTraySummary(degraded, sampleConfig);
     expect(summary.running).toBe(false);
+    expect(summary.runMode).toBe("off");
     expect(summary.needsAttention).toBe(true);
   });
 

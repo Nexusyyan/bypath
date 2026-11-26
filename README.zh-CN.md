@@ -17,21 +17,21 @@ Bypath 面向需要“开源版 Proxifier”体验的桌面用户与开发者：
 
 ## 核心特性
 
-- **GitHub Release 真正开箱即用**：主推完整包 `bypath-<tag>-windows-x64.zip` 由 CI 严格校验并仅内置官方签名版 `WinDivert.dll` + `WinDivert64.sys` 与完整 LGPLv3 许可（剔除易触发误报的 sample 工具），解压双击 `bypath-gui.exe` -> 核对/修改代理端口 -> 授权一次后台服务即可一键开启/关闭代理；同步提供 `-nodriver.zip` 纯净无驱动包。
+- **GitHub Release 真正开箱即用**：主推完整包 `bypath-<tag>-windows-x64.zip` 由 CI 严格校验并仅内置官方签名版 `WinDivert.dll` + `WinDivert64.sys` 与完整 LGPLv3 许可（剔除易触发误报的 sample 工具），解压双击 `bypath-gui.exe` 后即可在左上角或系统托盘一键切换 **关闭 / 前台模式 / 后台模式**；同步提供 `-nodriver.zip` 纯净无驱动包。
 - **零全局路由冲突**：不创建虚拟网卡、不改动系统路由表，与企业 VPN、WSL2、Docker Desktop、Hyper-V 及局域网设备无缝共存。
 - **完整进程树追踪与动态防环回**：自动沿父子进程链追踪派生子进程，结合 `NtQueryInformationProcess` 微秒级单 PID 解析、WinDivert `SOCKET` 预热以及上游代理重启自动刷新防环回 PID，稳定接管短生命周期子进程。
 - **跨分段后量子 TLS SNI 嗅探与双阶段域名治理**：兼容现代 Chrome/Electron/Go 启用 `X25519MLKEM768` 产生的大包分片 TLS ClientHello，结合 HTTP `Host` 与 QUIC Initial 检测，支持精确域名、通配符（`*.example.com`）与模糊匹配下的拦截（Block）、直连放行（Direct）与指定代理覆写。
-- **桌面常驻体验与全链路可观测**：支持关闭最小化到系统托盘、自定义无边框 CSS 双语托盘弹窗（实时速率/活跃连接、一键启停、快捷跳转与语言/主题联动切换）、Win32 单实例防多开、浅色 / 纯炭黑深色 / 跟随系统主题、自动经由上游代理或直连检测 GitHub Releases 新版本、全定制圆角控件（无原生尖角弹窗）、切页保留筛选状态、全局快捷键（`Ctrl+K`、`Ctrl+1..4`、`Space`、`Esc`）、60 秒实时吞吐折线、按进程/域名流量汇总、规则编辑与优先级排序、规则干跑命中测试、守护进程实时日志面板、TOML 导入导出、CSV 导出与绿色便携模式（`portable.json`）。
+- **桌面常驻体验与全链路可观测**：侧栏、诊断页与自定义无边框 CSS 双语托盘弹窗三端联动一键切换 **关闭 / 前台 / 后台** 运行模式（标准用户切换前台自动平滑 UAC 提权交接，切换后台自动按需安装/启动 `BypathService`）；支持可选 **开机自启动**（默认关闭，静默启动到系统托盘）；支持关闭最小化到系统托盘、Win32 单实例防多开、浅色 / 纯炭黑深色 / 跟随系统主题、代理感知 GitHub Releases 检查更新、全定制圆角控件、全局快捷键、60 秒实时吞吐折线、按进程/域名流量汇总、规则优先级排序与干跑测试、实时日志面板、TOML/CSV 导入导出与绿色便携模式（`portable.json`）。
 - **AI Agent 与 CLI 自动化（高自由度 DIY）**：内置原生 Stdio MCP Server（`bypath mcp`）与结构化 JSON 命令行接口（`bypath ctl --json`），可在 Antigravity、Claude Code、Cursor 中直接让 AI 帮您读取系统代理、编排规则、干跑测试、检查版本更新与排查连接日志。
 
 ## 快速开始（Windows 10/11 x64）
 
 ### 方式一：直接从 GitHub Releases 下载（推荐新手）
 
-1. 前往 [GitHub Releases](https://github.com/Nexusyyan/bypath/releases) 下载并解压 **`bypath-v0.4.1-windows-x64.zip`**。
+1. 前往 [GitHub Releases](https://github.com/Nexusyyan/bypath/releases) 下载并解压 **`bypath-v0.4.2-windows-x64.zip`**。
 2. 双击运行 **`bypath-gui.exe`**。
-3. 如你的本地代理端口不是默认 `127.0.0.1:10808`（如 Clash 的 `127.0.0.1:7897`），点击「修改代理」（或在「上游代理」页自由编辑 / 点击「读取系统代理」）保存；然后点击一次 **一键授权并启动服务**。
-4. 在「应用与域名规则」勾选 **Antigravity** 等预设，点击 **开启代理** 即可。点击关闭按钮会静默缩入系统托盘，右键托盘可随时启停或彻底退出。
+3. 如你的本地代理端口不是默认 `127.0.0.1:10808`（如 Clash 的 `127.0.0.1:7897`），前往「上游代理」页自由编辑或点击「读取系统代理」并保存。
+4. 在「应用与域名规则」勾选 **Antigravity** 等预设，在左上角或系统托盘一键选择 **后台**（自动安装/启动 `BypathService`，关闭窗口仍常驻代理且日常免弹窗）或 **前台**（随桌面端启停，标准用户自动弹出一次 UAC 提权）。如需开机自动静默运行，可在「诊断与服务」开启 **开机自启动**（默认关闭）。
 
 > **便携模式**：在 `bypath-gui.exe` 同目录放置 `portable.json`（内容 `{"portable":true}`），所有配置与日志将自动保存于 `./bypath-data/` 目录。
 

@@ -4,6 +4,12 @@ import { Titlebar } from "./components/Titlebar";
 import { api } from "./lib/api";
 import { domainPatternMatches } from "./lib/connections";
 import { useI18n, type MessageKey } from "./lib/i18n";
+import {
+  classifyDriverReadiness,
+  classifyRuntimeError,
+  deriveRunMode,
+  needsDriverRecovery,
+} from "./lib/mode";
 import { useTheme, type ThemeMode } from "./lib/theme";
 import { buildTrayTooltip, extractFirstProxyAddress } from "./lib/tray";
 import type {
@@ -15,6 +21,7 @@ import type {
   LogEntry,
   NavTab,
   PresetInfo,
+  ProxyRunMode,
   RuleConfig,
   ThroughputPoint,
   UpdateCheckReport,
@@ -74,8 +81,7 @@ export function App() {
   const [throughputHistory, setThroughputHistory] = useState<ThroughputPoint[]>([]);
   const [connViewState, setConnViewState] = useState<ConnectionsViewState>(DEFAULT_CONN_STATE);
   const [paused, setPaused] = useState(false);
-  const [togglingEngine, setTogglingEngine] = useState(false);
-  const [authorizingService, setAuthorizingService] = useState(false);
+  const [switchingMode, setSwitchingMode] = useState<ProxyRunMode | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<{ text: string; isError: boolean } | null>(null);
   const [updateReport, setUpdateReport] = useState<UpdateCheckReport | null>(null);
@@ -87,6 +93,18 @@ export function App() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const themeBootstrappedRef = useRef(false);
   const startupUpdateCheckedRef = useRef(false);
+
+  const formatRuntimeError = useCallback(
+    (raw: string): string => {
+      const code = classifyRuntimeError(raw);
+      if (code === "elevation_cancelled") return t("mode.errElevationCancelled");
+      if (code === "service_cancelled") return t("mode.errServiceCancelled");
+      if (code === "service_pipe_timeout") return t("mode.errServiceTimeout");
+      if (code === "access_denied") return t("mode.errAccessDenied");
+      return raw;
+    },
+    [t]
+  );
 
   const flashNotice = useCallback((text: string, isError = false) => {
     setNotice({ text, isError });
@@ -134,9 +152,10 @@ export function App() {
         }
       }
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : String(err), true);
+      const raw = err instanceof Error ? err.message : String(err);
+      flashNotice(formatRuntimeError(raw), true);
     }
-  }, [flashNotice, setThemeMode]);
+  }, [flashNotice, formatRuntimeError, setThemeMode]);
 
   useEffect(() => {
     void refreshAll();
@@ -200,20 +219,21 @@ export function App() {
 
   // Sync localized tray tooltip and close-to-tray behavior whenever state changes.
   const firstProxyAddress = extractFirstProxyAddress(config);
+  const runMode = deriveRunMode(status);
 
   useEffect(() => {
-    const running = status?.engine_running ?? false;
+    const running = runMode !== "off";
     const proxyLabel = firstProxyAddress ?? "-";
-    const tooltip = buildTrayTooltip(
-      running,
-      t("tray.statusRunning", { proxy: proxyLabel }),
-      t("tray.statusStandby")
-    );
+    const runningLabel =
+      runMode === "background"
+        ? t("tray.statusBackground", { proxy: proxyLabel })
+        : t("tray.statusForeground", { proxy: proxyLabel });
+    const tooltip = buildTrayTooltip(running, runningLabel, t("tray.statusOff"));
     void api.setTrayState({
       tooltip,
       minimize_to_tray: config?.general.minimize_to_tray ?? true,
     });
-  }, [locale, status?.engine_running, firstProxyAddress, config?.general.minimize_to_tray, t]);
+  }, [locale, runMode, firstProxyAddress, config?.general.minimize_to_tray, t]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -328,7 +348,7 @@ export function App() {
                   : prev
               );
               if (evt.error) {
-                flashNotice(evt.error, true);
+                flashNotice(formatRuntimeError(evt.error), true);
               }
               break;
             case "config_reloaded":
@@ -350,24 +370,31 @@ export function App() {
     return () => {
       unlisten?.();
     };
-  }, [flashNotice, refreshAll]);
+  }, [flashNotice, formatRuntimeError, refreshAll]);
 
-  const handleToggleEngine = async () => {
-    setTogglingEngine(true);
+  const handleSelectMode = async (target: ProxyRunMode) => {
+    setSwitchingMode(target);
     setNotice(null);
     try {
-      if (status?.engine_running) {
-        await api.stopEngine();
-        flashNotice(t("engine.toastStopped"));
+      const res = await api.setRunMode(target);
+      setStatus(res.status);
+      if (res.elevating) {
+        flashNotice(t("mode.toastForegroundElevating"), false);
+        return;
+      }
+      if (target === "off") {
+        flashNotice(t("mode.toastOff"), false);
+      } else if (target === "foreground") {
+        flashNotice(t("mode.toastForeground"), false);
       } else {
-        await api.startEngine();
-        flashNotice(t("engine.toastStarted"));
+        flashNotice(t("mode.toastBackground"), false);
       }
       await refreshAll();
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : String(err), true);
+      const raw = err instanceof Error ? err.message : String(err);
+      flashNotice(formatRuntimeError(raw), true);
     } finally {
-      setTogglingEngine(false);
+      setSwitchingMode(null);
     }
   };
 
@@ -381,23 +408,10 @@ export function App() {
       const st = await api.getStatus();
       setStatus(st);
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : String(err), true);
+      const raw = err instanceof Error ? err.message : String(err);
+      flashNotice(formatRuntimeError(raw), true);
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleAuthorizeService = async () => {
-    setAuthorizingService(true);
-    setNotice(null);
-    try {
-      const action = status?.service_installed ? "start" : "install";
-      await api.manageWindowsService(action);
-      await refreshAll();
-    } catch (err) {
-      flashNotice(err instanceof Error ? err.message : String(err), true);
-    } finally {
-      setAuthorizingService(false);
     }
   };
 
@@ -415,7 +429,8 @@ export function App() {
       );
       await refreshAll();
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : String(err), true);
+      const raw = err instanceof Error ? err.message : String(err);
+      flashNotice(formatRuntimeError(raw), true);
     }
   };
 
@@ -424,7 +439,8 @@ export function App() {
       await api.clearConnections();
       setConnections((prev) => prev.filter((c) => c.state === "active"));
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : String(err), true);
+      const raw = err instanceof Error ? err.message : String(err);
+      flashNotice(formatRuntimeError(raw), true);
     }
   };
 
@@ -534,13 +550,8 @@ export function App() {
     );
   };
 
-  const driverReady = Boolean(status?.windivert_ready);
-  const driverPresentNeedsAuth =
-    !driverReady &&
-    (status?.windivert_error_kind === "access_denied" || Boolean(status?.windivert_dll_path));
-  const driverMissingOrBlocked = !driverReady && !driverPresentNeedsAuth;
-  const serviceOrAdminReady = Boolean(status?.service_running || status?.elevated);
-  const showReadinessCard = Boolean(status && (!driverReady || !serviceOrAdminReady));
+  const driverReadiness = classifyDriverReadiness(status);
+  const showDriverRecoveryBanner = needsDriverRecovery(status);
 
   return (
     <div className="app-frame">
@@ -559,8 +570,8 @@ export function App() {
           onSelectTab={setActiveTab}
           status={status}
           config={config}
-          togglingEngine={togglingEngine}
-          onToggleEngine={() => void handleToggleEngine()}
+          switchingMode={switchingMode}
+          onSelectMode={(target) => void handleSelectMode(target)}
         />
 
         <main className="main-area">
@@ -585,102 +596,36 @@ export function App() {
               </div>
             )}
 
-            {showReadinessCard && status && (
-              <section className="readiness-card" aria-label={t("setup.title")}>
-                <div className="readiness-top">
-                  <div>
-                    <h2 className="section-title">{t("setup.title")}</h2>
-                    <p className="section-desc">{t("setup.desc")}</p>
+            {showDriverRecoveryBanner && status && (
+              <section className="recovery-banner" aria-label={t("recovery.title")}>
+                <div className="recovery-banner-body">
+                  <div className="recovery-banner-title">
+                    <span className="dot dot-err" aria-hidden="true" />
+                    <span>{t("recovery.title")}</span>
                   </div>
-                  <div className="toolbar-group">
-                    {!serviceOrAdminReady && (
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-primary"
-                        disabled={authorizingService}
-                        onClick={() => void handleAuthorizeService()}
-                      >
-                        {authorizingService ? t("setup.authorizing") : t("setup.authorizeBtn")}
-                      </button>
-                    )}
-                    {driverMissingOrBlocked && (
-                      <>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-outline"
-                          onClick={() => void handleLocateDriverDir()}
-                        >
-                          {t("setup.pickDriverDir")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-ghost"
-                          onClick={() => void api.openWindowsSecurity()}
-                        >
-                          {t("setup.openSecurity")}
-                        </button>
-                      </>
-                    )}
-                  </div>
+                  <p className="recovery-banner-desc">
+                    {driverReadiness === "blocked_by_security"
+                      ? t("recovery.descBlocked")
+                      : driverReadiness === "missing"
+                        ? t("recovery.descMissing")
+                        : t("recovery.descError")}
+                  </p>
                 </div>
-
-                <div className="readiness-steps">
-                  <div className="readiness-step">
-                    <div className="readiness-step-head">
-                      <span
-                        className={`dot ${
-                          driverReady
-                            ? "dot-ok"
-                            : driverPresentNeedsAuth
-                              ? "dot-warn"
-                              : "dot-err"
-                        }`}
-                      />
-                      <span>{t("setup.stepDriver")}</span>
-                    </div>
-                    <div className="readiness-step-desc">
-                      {driverReady
-                        ? t("setup.driverReady", {
-                            version: status.windivert_version ?? "v2.2",
-                          })
-                        : driverPresentNeedsAuth
-                          ? t("setup.driverNeedsAuth")
-                          : t("setup.driverMissing")}
-                    </div>
-                  </div>
-
-                  <div className="readiness-step">
-                    <div className="readiness-step-head">
-                      <span className={`dot ${serviceOrAdminReady ? "dot-ok" : "dot-warn"}`} />
-                      <span>{t("setup.stepService")}</span>
-                    </div>
-                    <div className="readiness-step-desc">
-                      {serviceOrAdminReady ? t("setup.serviceReady") : t("setup.serviceNeeded")}
-                    </div>
-                  </div>
-
-                  <div className="readiness-step">
-                    <div
-                      className="readiness-step-head"
-                      style={{ justifyContent: "space-between" }}
-                    >
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                        <span className={`dot ${firstProxyAddress ? "dot-ok" : "dot-warn"}`} />
-                        <span>{t("setup.stepProxy")}</span>
-                      </span>
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-ghost"
-                        style={{ height: 22, padding: "0 6px", fontSize: 11.5 }}
-                        onClick={() => setActiveTab("proxies")}
-                      >
-                        {t("setup.proxyEdit")}
-                      </button>
-                    </div>
-                    <div className="readiness-step-desc mono">
-                      {firstProxyAddress ?? "-"}
-                    </div>
-                  </div>
+                <div className="toolbar-group">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => void handleLocateDriverDir()}
+                  >
+                    {t("setup.pickDriverDir")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => void api.openWindowsSecurity()}
+                  >
+                    {t("setup.openSecurity")}
+                  </button>
                 </div>
               </section>
             )}
@@ -696,9 +641,10 @@ export function App() {
                 searchInputRef={searchInputRef}
                 paused={paused}
                 saving={saving}
+                switchingMode={switchingMode}
                 onTogglePause={() => setPaused((v) => !v)}
                 onClearClosed={() => void handleClearClosed()}
-                onStartEngine={() => void handleToggleEngine()}
+                onSelectMode={(target) => void handleSelectMode(target)}
                 onOpenDiagnostics={() => setActiveTab("diagnostics")}
                 onBlockDomain={(pattern) => void handleBlockDomain(pattern)}
                 onDirectDomain={(pattern) => void handleDirectDomain(pattern)}
@@ -732,9 +678,11 @@ export function App() {
                 configPath={configPath}
                 logs={logs}
                 saving={saving}
+                switchingMode={switchingMode}
                 updateReport={updateReport}
                 checkingUpdates={checkingUpdates}
                 updateError={updateError}
+                onSelectMode={(target) => void handleSelectMode(target)}
                 onCheckUpdates={() => void handleCheckUpdates(false)}
                 onSaveConfig={handleSaveConfig}
                 onRefreshStatus={refreshAll}

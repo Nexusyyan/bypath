@@ -1,22 +1,22 @@
 import {
   ActivityIcon,
   AppsIcon,
-  PlayIcon,
   RouteIcon,
   SettingsIcon,
   ShieldIcon,
-  StopIcon,
 } from "./Icons";
+import { ModeSwitcher } from "./ModeSwitcher";
 import { useI18n } from "../lib/i18n";
-import type { Config, DaemonStatus, NavTab } from "../lib/types";
+import { deriveRunMode, needsDriverRecovery } from "../lib/mode";
+import type { Config, DaemonStatus, NavTab, ProxyRunMode } from "../lib/types";
 
 interface SidebarProps {
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
   status: DaemonStatus | null;
   config: Config | null;
-  togglingEngine: boolean;
-  onToggleEngine: () => void;
+  switchingMode: ProxyRunMode | null;
+  onSelectMode: (target: ProxyRunMode) => void;
 }
 
 export function Sidebar({
@@ -24,37 +24,41 @@ export function Sidebar({
   onSelectTab,
   status,
   config,
-  togglingEngine,
-  onToggleEngine,
+  switchingMode,
+  onSelectMode,
 }: SidebarProps) {
   const { t } = useI18n();
-  const running = status?.engine_running ?? false;
+  const runMode = deriveRunMode(status);
+  const running = runMode !== "off";
   const activeConns = status?.stats.active_connections ?? 0;
   const enabledRules = config?.rules.filter((r) => r.enabled) ?? [];
   const proxiesCount = config ? Object.keys(config.proxies).length : 0;
-  const needsAttention = status ? !status.windivert_ready : false;
+  const driverNeedsAttention = needsDriverRecovery(status);
+
+  const footerLabel =
+    runMode === "background"
+      ? t("nav.modeBackground")
+      : runMode === "foreground"
+        ? t("nav.modeForeground")
+        : status?.service_running
+          ? t("nav.serviceStandby")
+          : t("nav.serviceSettings");
+
+  const footerDot = driverNeedsAttention
+    ? "dot-warn"
+    : running
+      ? "dot-ok"
+      : "dot-idle";
 
   return (
     <aside className="sidebar" aria-label={t("nav.ariaLabel")}>
       <div className="sidebar-cta-wrap">
-        <button
-          type="button"
-          className={`engine-cta ${running ? "stop" : "start"}`}
-          disabled={togglingEngine}
-          onClick={onToggleEngine}
-        >
-          {running ? (
-            <>
-              <StopIcon size={11} />
-              <span>{togglingEngine ? t("engine.stopping") : t("engine.stop")}</span>
-            </>
-          ) : (
-            <>
-              <PlayIcon size={12} />
-              <span>{togglingEngine ? t("engine.starting") : t("engine.start")}</span>
-            </>
-          )}
-        </button>
+        <ModeSwitcher
+          mode={runMode}
+          switchingTo={switchingMode}
+          status={status}
+          onSelectMode={onSelectMode}
+        />
       </div>
 
       <nav className="sidebar-nav">
@@ -103,7 +107,7 @@ export function Sidebar({
             <ShieldIcon size={15} />
             <span>{t("nav.diagnostics")}</span>
           </span>
-          {needsAttention && (
+          {driverNeedsAttention && (
             <span className="dot dot-warn" title={t("nav.needsAttention")} />
           )}
         </button>
@@ -150,18 +154,9 @@ export function Sidebar({
         >
           <span className="nav-item-left">
             <SettingsIcon size={14} />
-            <span>
-              {status?.service_running
-                ? t("nav.serviceActive")
-                : status?.elevated
-                  ? t("nav.adminLocal")
-                  : t("nav.serviceSettings")}
-            </span>
+            <span>{footerLabel}</span>
           </span>
-          <span
-            className={`dot ${status?.windivert_ready ? "dot-ok" : "dot-warn"}`}
-            aria-hidden="true"
-          />
+          <span className={`dot ${footerDot}`} aria-hidden="true" />
         </button>
       </div>
     </aside>

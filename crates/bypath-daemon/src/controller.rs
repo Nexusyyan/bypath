@@ -91,6 +91,22 @@ impl DaemonController {
         self.config.read().expect("config lock poisoned").clone()
     }
 
+    pub fn is_engine_running(&self) -> bool {
+        self.telemetry.is_running()
+    }
+
+    /// Reloads configuration from `self.config_path` when the file exists on disk so an
+    /// embedded controller stays synchronized with edits written by the background service.
+    pub fn reload_config_from_disk(&self) -> Result<()> {
+        if !self.config_path.exists() {
+            return Ok(());
+        }
+        let cfg = Config::from_file(&self.config_path)?;
+        let mut guard = self.config.write().expect("config lock poisoned");
+        *guard = cfg;
+        Ok(())
+    }
+
     pub async fn start_engine(&self) -> Result<()> {
         let mut guard = self.active.lock().await;
         if let Some(ref running) = *guard {

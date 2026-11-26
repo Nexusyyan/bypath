@@ -28,11 +28,13 @@ import {
 } from "../lib/connections";
 import { formatBytes, formatDuration, formatSpeed, formatTime, formatUptime } from "../lib/format";
 import { useI18n } from "../lib/i18n";
+import { classifyDriverReadiness, deriveRunMode, needsDriverRecovery } from "../lib/mode";
 import type {
   Config,
   ConnectionRecord,
   ConnectionsViewState,
   DaemonStatus,
+  ProxyRunMode,
   SortKey,
   StateFilter,
   ThroughputPoint,
@@ -48,9 +50,10 @@ interface ConnectionsViewProps {
   searchInputRef: RefObject<HTMLInputElement | null>;
   paused: boolean;
   saving: boolean;
+  switchingMode: ProxyRunMode | null;
   onTogglePause: () => void;
   onClearClosed: () => void;
-  onStartEngine: () => void;
+  onSelectMode: (target: ProxyRunMode) => void;
   onOpenDiagnostics: () => void;
   onBlockDomain: (pattern: string) => void;
   onDirectDomain: (pattern: string) => void;
@@ -100,9 +103,10 @@ export function ConnectionsView({
   searchInputRef,
   paused,
   saving,
+  switchingMode,
   onTogglePause,
   onClearClosed,
-  onStartEngine,
+  onSelectMode,
   onOpenDiagnostics,
   onBlockDomain,
   onDirectDomain,
@@ -224,35 +228,40 @@ export function ConnectionsView({
     onNotify(t("connections.exportedCsv", { count: filteredAndSorted.length }));
   };
 
-  const running = status?.engine_running ?? false;
+  const runMode = deriveRunMode(status);
+  const running = runMode !== "off";
   const stats = status?.stats;
-  const dllLoaded = Boolean(status?.windivert_dll_path);
-  const accessDenied =
-    status?.windivert_error_kind === "access_denied" ||
-    (status?.windivert_error ?? "").toLowerCase().includes("access denied") ||
-    (status?.windivert_error ?? "").includes("os error 5");
+  const driverReadiness = classifyDriverReadiness(status);
+  const driverNeedsRecovery = needsDriverRecovery(status);
+
+  const modeLabel =
+    runMode === "background"
+      ? t("mode.backgroundActive")
+      : runMode === "foreground"
+        ? t("mode.foregroundActive")
+        : t("mode.offTitle");
 
   const standbySubText = running
     ? t("connections.uptime", { uptime: formatUptime(stats?.uptime_secs ?? 0) })
-    : status?.windivert_ready
+    : driverReadiness === "ready"
       ? t("connections.windivertReady", {
-          version: status.windivert_version ?? "v2.2",
+          version: status?.windivert_version ?? "v2.2",
         })
-      : accessDenied
-        ? t("connections.driverAccessDenied")
-        : dllLoaded
-          ? t("connections.driverCheckFailed")
-          : t("connections.windivertMissing");
+      : driverReadiness === "files_ready_needs_privilege"
+        ? t("connections.driverFilesReady")
+        : driverReadiness === "missing"
+          ? t("connections.windivertMissing")
+          : t("connections.driverCheckFailed");
 
   const standbyEmptyDesc = running
     ? t("connections.emptyRunningDesc")
-    : status?.windivert_ready
+    : driverReadiness === "ready"
       ? t("connections.emptyReadyDesc")
-      : accessDenied
-        ? t("connections.emptyDeniedDesc")
-        : dllLoaded
-          ? status?.windivert_error ?? t("connections.emptyCheckDesc")
-          : t("connections.emptyMissingDesc");
+      : driverReadiness === "files_ready_needs_privilege"
+        ? t("connections.emptyFilesReadyDesc")
+        : driverReadiness === "missing"
+          ? t("connections.emptyMissingDesc")
+          : t("connections.emptyCheckDesc");
 
   const totalActiveCount = useMemo(
     () => connections.filter((c) => c.state === "active").length,
@@ -269,7 +278,7 @@ export function ConnectionsView({
           <span className="telemetry-label">{t("connections.interception")}</span>
           <span className="telemetry-value">
             <span className={`dot ${running ? "dot-ok" : "dot-idle"}`} />
-            {running ? t("engine.running") : t("engine.standby")}
+            {modeLabel}
           </span>
           <span className="telemetry-sub">{standbySubText}</span>
         </div>
@@ -509,10 +518,25 @@ export function ConnectionsView({
             </p>
             {connections.length === 0 && !running && (
               <div className="toolbar-group" style={{ marginTop: 6 }}>
-                {status?.windivert_ready ? (
-                  <button type="button" className="btn btn-secondary" onClick={onStartEngine}>
-                    {t("engine.start")}
-                  </button>
+                {!driverNeedsRecovery ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={switchingMode !== null}
+                      onClick={() => onSelectMode("background")}
+                    >
+                      {t("connections.startBackground")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      disabled={switchingMode !== null}
+                      onClick={() => onSelectMode("foreground")}
+                    >
+                      {t("connections.startForeground")}
+                    </button>
+                  </>
                 ) : (
                   <button
                     type="button"

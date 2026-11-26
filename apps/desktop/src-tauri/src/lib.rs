@@ -19,13 +19,14 @@ use bypath_windivert::is_elevated;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, RunEvent, State, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+use tokio::sync::watch;
 use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -39,6 +40,13 @@ const TRAY_DEFAULT_HEIGHT: f64 = 456.0;
 const FOCUS_PIPE_NAME: &str = r"\\.\pipe\bypath-gui-focus-v1";
 #[cfg(windows)]
 const SINGLE_INSTANCE_MUTEX: &str = "Local\\BypathDesktopSingleInstanceV1";
+#[cfg(windows)]
+const STARTUP_RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const STARTUP_APPROVED_SUBKEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+#[cfg(windows)]
+const STARTUP_VALUE_NAME: &str = "Bypath";
 
 /// Allows a standalone `bypath-gui.exe` to host `BypathService` directly when a sibling
 /// `bypath-daemon.exe` is not present alongside it.
@@ -80,31 +88,94 @@ pub fn maybe_run_service_mode(args: &[String]) -> Option<i32> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LaunchOptions {
+    start_foreground: bool,
+    handoff: bool,
+    minimized: bool,
+    audit_instance: bool,
+}
+
+impl LaunchOptions {
+    fn parse(args: &[String]) -> Self {
+        let mut opts = Self::default();
+        for arg in args {
+            match arg.as_str() {
+                "--start-foreground" => opts.start_foreground = true,
+                "--handoff" => opts.handoff = true,
+                "--minimized" => opts.minimized = true,
+                "--audit-instance" => opts.audit_instance = true,
+                _ => {}
+            }
+        }
+        opts
+    }
+}
+
 struct AppBackend {
     ipc: IpcClient,
     embedded: Arc<DaemonController>,
+    active_backend: RwLock<BackendMode>,
+    mode_tx: watch::Sender<BackendMode>,
     minimize_to_tray: AtomicBool,
     allow_exit: AtomicBool,
+    #[cfg(windows)]
+    single_instance_guard: Mutex<Option<SingleInstanceGuard>>,
     tray_last_blur: Mutex<Option<Instant>>,
     tray_last_shown: Mutex<Option<Instant>>,
     tray_last_anchor: Mutex<Option<(f64, f64)>>,
 }
 
 impl AppBackend {
-    fn new() -> Result<Self, String> {
+    fn new(
+        initial_mode: BackendMode,
+        #[cfg(windows)] single_instance_guard: Option<SingleInstanceGuard>,
+    ) -> Result<Self, String> {
         let cfg_path = default_config_path();
         let embedded = DaemonController::new(cfg_path, BackendMode::Embedded)
             .map_err(|e| format!("failed to initialize local engine controller: {e}"))?;
         let initial_minimize = embedded.current_config().general.minimize_to_tray;
+        let (mode_tx, _) = watch::channel(initial_mode);
         Ok(Self {
             ipc: IpcClient::default(),
             embedded,
+            active_backend: RwLock::new(initial_mode),
+            mode_tx,
             minimize_to_tray: AtomicBool::new(initial_minimize),
             allow_exit: AtomicBool::new(false),
+            #[cfg(windows)]
+            single_instance_guard: Mutex::new(single_instance_guard),
             tray_last_blur: Mutex::new(None),
             tray_last_shown: Mutex::new(None),
             tray_last_anchor: Mutex::new(None),
         })
+    }
+
+    fn current_backend(&self) -> BackendMode {
+        self.active_backend
+            .read()
+            .map(|g| *g)
+            .unwrap_or(BackendMode::Embedded)
+    }
+
+    fn set_active_backend(&self, mode: BackendMode) {
+        if let Ok(mut guard) = self.active_backend.write() {
+            if *guard != mode {
+                *guard = mode;
+                let _ = self.mode_tx.send(mode);
+            }
+        }
+    }
+
+    fn subscribe_mode(&self) -> watch::Receiver<BackendMode> {
+        self.mode_tx.subscribe()
+    }
+
+    #[cfg(windows)]
+    fn release_single_instance(&self) {
+        if let Ok(mut guard) = self.single_instance_guard.lock() {
+            *guard = None;
+        }
     }
 
     async fn is_service_pipe_live(&self) -> bool {
@@ -114,14 +185,55 @@ impl AppBackend {
         )
     }
 
-    /// Dispatches a request to the background Windows Service / Named Pipe daemon if online,
-    /// transparently falling back to the embedded local controller otherwise.
+    async fn wait_for_service_pipe(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.is_service_pipe_live().await {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    /// Dispatches requests to the active runtime mode:
+    /// - Pinned to `embedded` whenever foreground mode is actively running.
+    /// - Otherwise routes to `BypathService` over Named Pipe when online, falling back
+    ///   cleanly to `embedded` (reloading disk config on fallback).
     async fn dispatch(&self, req: IpcRequest) -> Result<IpcResponse, String> {
+        let current = self.current_backend();
+        if current == BackendMode::Embedded && self.embedded.is_engine_running() {
+            return Ok(self.embedded.handle(req).await);
+        }
         if let Ok(resp) = self.ipc.request(&req).await {
+            if current != BackendMode::Service {
+                self.set_active_backend(BackendMode::Service);
+            }
             return Ok(resp);
+        }
+        if current != BackendMode::Embedded {
+            let _ = self.embedded.reload_config_from_disk();
+            self.set_active_backend(BackendMode::Embedded);
         }
         Ok(self.embedded.handle(req).await)
     }
+
+    async fn current_status(&self) -> Result<DaemonStatus, String> {
+        match self.dispatch(IpcRequest::GetStatus).await? {
+            IpcResponse::Status { status } => Ok(status),
+            IpcResponse::Error { message } => Err(message),
+            other => Err(format!("unexpected status response: {other:?}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetRunModeResult {
+    mode: String,
+    elevating: bool,
+    status: DaemonStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,17 +691,370 @@ async fn pick_directory(title: Option<String>) -> Result<Option<String>, String>
 }
 
 #[tauri::command]
+async fn set_run_mode(
+    app: AppHandle,
+    state: State<'_, Arc<AppBackend>>,
+    mode: String,
+) -> Result<SetRunModeResult, String> {
+    match mode.as_str() {
+        "off" => {
+            let _ = state.embedded.stop_engine().await;
+            if state.is_service_pipe_live().await {
+                let _ = state.ipc.request(&IpcRequest::StopEngine).await;
+                state.set_active_backend(BackendMode::Service);
+            } else {
+                state.set_active_backend(BackendMode::Embedded);
+            }
+            let _ = app.emit("bypath://refresh", ());
+            let status = state.current_status().await?;
+            Ok(SetRunModeResult {
+                mode: "off".into(),
+                elevating: false,
+                status,
+            })
+        }
+        "foreground" => {
+            if !is_elevated() {
+                #[cfg(windows)]
+                {
+                    let exe = std::env::current_exe()
+                        .map_err(|e| format!("failed to resolve current executable: {e}"))?;
+                    spawn_elevated_foreground(&exe)?;
+                    let status = state.current_status().await?;
+                    let app_clone = app.clone();
+                    let backend_clone = Arc::clone(state.inner());
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                        backend_clone.allow_exit.store(true, Ordering::SeqCst);
+                        hide_tray_window(&app_clone);
+                        if let Some(win) = app_clone.get_webview_window("main") {
+                            let _ = win.hide();
+                        }
+                        backend_clone.release_single_instance();
+                        app_clone.exit(0);
+                    });
+                    return Ok(SetRunModeResult {
+                        mode: "foreground".into(),
+                        elevating: true,
+                        status,
+                    });
+                }
+                #[cfg(not(windows))]
+                {
+                    return Err("Foreground elevation is only supported on Windows".into());
+                }
+            }
+
+            if state.is_service_pipe_live().await {
+                if let Ok(IpcResponse::Status { status }) =
+                    state.ipc.request(&IpcRequest::GetStatus).await
+                {
+                    if status.engine_running {
+                        let _ = state.ipc.request(&IpcRequest::StopEngine).await;
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                    }
+                }
+            }
+
+            let _ = state.embedded.reload_config_from_disk();
+            state.set_active_backend(BackendMode::Embedded);
+            state
+                .embedded
+                .start_engine()
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = app.emit("bypath://refresh", ());
+            let status = state.current_status().await?;
+            Ok(SetRunModeResult {
+                mode: "foreground".into(),
+                elevating: false,
+                status,
+            })
+        }
+        "background" => {
+            let was_embedded_running = state.embedded.is_engine_running();
+            let embedded_cfg = if was_embedded_running {
+                Some(state.embedded.current_config())
+            } else {
+                None
+            };
+            if was_embedded_running {
+                let _ = state.embedded.stop_engine().await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            if !state.is_service_pipe_live().await {
+                let svc = query_service_status();
+                let action = if svc.installed { "start" } else { "install" };
+                execute_service_action(action)?;
+                if !state.wait_for_service_pipe(Duration::from_secs(8)).await {
+                    return Err("SERVICE_PIPE_TIMEOUT".into());
+                }
+            }
+
+            if let Some(cfg) = embedded_cfg {
+                let _ = state
+                    .ipc
+                    .request(&IpcRequest::SaveConfig {
+                        config: cfg,
+                        reload: false,
+                    })
+                    .await;
+            }
+
+            state.set_active_backend(BackendMode::Service);
+            match state
+                .ipc
+                .request(&IpcRequest::StartEngine)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                IpcResponse::Ok { .. } => {}
+                IpcResponse::Error { message } => return Err(message),
+                other => return Err(format!("unexpected start_engine response: {other:?}")),
+            }
+
+            let _ = app.emit("bypath://refresh", ());
+            let status = state.current_status().await?;
+            Ok(SetRunModeResult {
+                mode: "background".into(),
+                elevating: false,
+                status,
+            })
+        }
+        other => Err(format!("unsupported run mode '{other}'")),
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn format_startup_command(exe_path: &Path) -> String {
+    format!("\"{}\" --minimized", exe_path.display())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_startup_approved_bytes(bytes: &[u8]) -> bool {
+    // Windows StartupApproved\Run uses an even leading byte (typically 0x02) for enabled
+    // and an odd leading byte (typically 0x03) when disabled via Task Manager.
+    bytes.first().map(|b| (*b & 1) == 0).unwrap_or(true)
+}
+
+#[cfg(windows)]
+fn read_launch_at_login_registry() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_BINARY, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+    };
+
+    let run_subkey = to_wide_null(STARTUP_RUN_SUBKEY);
+    let mut run_key = HKEY::default();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(run_subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut run_key,
+        )
+    }
+    .is_err()
+    {
+        return false;
+    }
+
+    let val_name = to_wide_null(STARTUP_VALUE_NAME);
+    let mut kind = REG_VALUE_TYPE::default();
+    let mut byte_len = 0u32;
+    let exists = unsafe {
+        RegQueryValueExW(
+            run_key,
+            PCWSTR(val_name.as_ptr()),
+            None,
+            Some(&mut kind),
+            None,
+            Some(&mut byte_len),
+        )
+    }
+    .is_ok()
+        && (kind == REG_SZ || kind == REG_EXPAND_SZ)
+        && byte_len > 2;
+    unsafe {
+        let _ = RegCloseKey(run_key);
+    }
+    if !exists {
+        return false;
+    }
+
+    let approved_subkey = to_wide_null(STARTUP_APPROVED_SUBKEY);
+    let mut approved_key = HKEY::default();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(approved_subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut approved_key,
+        )
+    }
+    .is_ok()
+    {
+        let mut akind = REG_VALUE_TYPE::default();
+        let mut buf = [0u8; 32];
+        let mut len = buf.len() as u32;
+        let ok = unsafe {
+            RegQueryValueExW(
+                approved_key,
+                PCWSTR(val_name.as_ptr()),
+                None,
+                Some(&mut akind),
+                Some(buf.as_mut_ptr()),
+                Some(&mut len),
+            )
+        }
+        .is_ok();
+        unsafe {
+            let _ = RegCloseKey(approved_key);
+        }
+        if ok && akind == REG_BINARY && len > 0 {
+            return is_startup_approved_bytes(&buf[..len as usize]);
+        }
+    }
+
+    true
+}
+
+#[cfg(windows)]
+fn delete_registry_value_best_effort(subkey: &str, value_name: &str) {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+    };
+
+    let subkey_w = to_wide_null(subkey);
+    let mut hkey = HKEY::default();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey_w.as_ptr()),
+            0,
+            KEY_SET_VALUE,
+            &mut hkey,
+        )
+    }
+    .is_ok()
+    {
+        let val_w = to_wide_null(value_name);
+        unsafe {
+            let _ = RegDeleteValueW(hkey, PCWSTR(val_w.as_ptr()));
+            let _ = RegCloseKey(hkey);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn write_launch_at_login_registry(enabled: bool) -> Result<bool, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+
+    if !enabled {
+        delete_registry_value_best_effort(STARTUP_RUN_SUBKEY, STARTUP_VALUE_NAME);
+        delete_registry_value_best_effort(STARTUP_APPROVED_SUBKEY, STARTUP_VALUE_NAME);
+        return Ok(false);
+    }
+
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("failed to resolve executable path for startup entry: {e}"))?;
+    let cmd = format_startup_command(&exe);
+    let cmd_w = to_wide_null(&cmd);
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(cmd_w.as_ptr().cast::<u8>(), cmd_w.len() * 2) };
+
+    let subkey_w = to_wide_null(STARTUP_RUN_SUBKEY);
+    let val_w = to_wide_null(STARTUP_VALUE_NAME);
+    let mut hkey = HKEY::default();
+    let create_res = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey_w.as_ptr()),
+            0,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut hkey,
+            None,
+        )
+    };
+    if create_res.is_err() {
+        return Err(format!(
+            "failed to open Windows startup registry key: {:?}",
+            create_res
+        ));
+    }
+
+    let set_res = unsafe {
+        RegSetValueExW(
+            hkey,
+            PCWSTR(val_w.as_ptr()),
+            0,
+            REG_SZ,
+            Some(bytes),
+        )
+    };
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+    if set_res.is_err() {
+        return Err(format!(
+            "failed to write Windows startup registry value: {:?}",
+            set_res
+        ));
+    }
+
+    // Clear any stale disabled Task Manager approval entry so launch-at-login takes effect cleanly.
+    delete_registry_value_best_effort(STARTUP_APPROVED_SUBKEY, STARTUP_VALUE_NAME);
+    Ok(true)
+}
+
+#[tauri::command]
+async fn get_launch_at_login() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        Ok(read_launch_at_login_registry())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+async fn set_launch_at_login(enabled: bool) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        write_launch_at_login_registry(enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("Launch at login is only implemented on Windows".into())
+    }
+}
+
+#[tauri::command]
 async fn get_service_status() -> Result<ServiceStateSummary, String> {
     Ok(query_service_status())
 }
 
-#[tauri::command]
-async fn manage_windows_service(action: String) -> Result<ServiceStateSummary, String> {
+fn execute_service_action(action: &str) -> Result<(), String> {
     let daemon_exe = locate_daemon_executable()?;
     let cfg_path = default_config_path();
 
     if is_elevated() {
-        match action.as_str() {
+        match action {
             "install" => {
                 install_service(&daemon_exe, &cfg_path, true).map_err(|e| e.to_string())?;
                 start_service().map_err(|e| e.to_string())?;
@@ -599,18 +1064,43 @@ async fn manage_windows_service(action: String) -> Result<ServiceStateSummary, S
             "uninstall" => uninstall_service().map_err(|e| e.to_string())?,
             other => return Err(format!("unsupported service action '{other}'")),
         }
+        Ok(())
     } else {
         #[cfg(windows)]
         {
-            run_elevated_daemon_action(&daemon_exe, &cfg_path, &action)?;
+            run_elevated_daemon_action(&daemon_exe, &cfg_path, action)
         }
         #[cfg(not(windows))]
         {
-            return Err("Windows Service management is only supported on Windows".into());
+            Err("Windows Service management is only supported on Windows".into())
         }
     }
+}
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+#[tauri::command]
+async fn manage_windows_service(
+    app: AppHandle,
+    state: State<'_, Arc<AppBackend>>,
+    action: String,
+) -> Result<ServiceStateSummary, String> {
+    execute_service_action(&action)?;
+
+    match action.as_str() {
+        "install" | "start" => {
+            let pipe_ready = state.wait_for_service_pipe(Duration::from_secs(8)).await;
+            if pipe_ready && !state.embedded.is_engine_running() {
+                state.set_active_backend(BackendMode::Service);
+            }
+        }
+        "stop" | "uninstall" => {
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            let _ = state.embedded.reload_config_from_disk();
+            state.set_active_backend(BackendMode::Embedded);
+        }
+        _ => {}
+    }
+
+    let _ = app.emit("bypath://refresh", ());
     Ok(query_service_status())
 }
 
@@ -658,11 +1148,59 @@ fn locate_cli_executable() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+fn to_wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn spawn_elevated_foreground(exe_path: &Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_CANCELLED};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let verb = to_wide_null("runas");
+    let file = to_wide_null(&exe_path.display().to_string());
+    let params = to_wide_null("--start-foreground --handoff");
+    let work_dir = exe_path
+        .parent()
+        .map(|p| to_wide_null(&p.display().to_string()));
+
+    let res = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            work_dir
+                .as_ref()
+                .map(|w| PCWSTR(w.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    let code = res.0 as isize;
+    if code <= 32 {
+        let last_err = unsafe { GetLastError() };
+        if last_err == ERROR_CANCELLED || code == 5 {
+            return Err("ELEVATION_CANCELLED".into());
+        }
+        return Err(format!(
+            "failed to relaunch elevated foreground mode (code {code})"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn run_elevated_daemon_action(
     daemon_exe: &Path,
     cfg_path: &Path,
     action: &str,
 ) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
     let exe_str = daemon_exe.display().to_string().replace('\'', "''");
     let cfg_str = cfg_path.display().to_string().replace('\'', "''");
     let script = match action {
@@ -676,17 +1214,21 @@ fn run_elevated_daemon_action(
     };
 
     let ps_cmd = format!(
-        "Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',\"{}\"",
+        "try {{ $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command',\"{}\"; exit $p.ExitCode }} catch {{ exit 1223 }}",
         script.replace('"', "`\"")
     );
 
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
+        .creation_flags(0x0800_0000)
         .status()
         .map_err(|e| format!("failed to launch elevated service command: {e}"))?;
 
     if !status.success() {
-        return Err("elevated service action was cancelled or failed".into());
+        if status.code() == Some(1223) {
+            return Err("SERVICE_ACTION_CANCELLED".into());
+        }
+        return Err("elevated service action failed".into());
     }
     Ok(())
 }
@@ -694,14 +1236,37 @@ fn run_elevated_daemon_action(
 fn spawn_event_forwarder(app: AppHandle, backend: Arc<AppBackend>) {
     tauri::async_runtime::spawn(async move {
         let mut embedded_rx = backend.embedded.telemetry().subscribe();
+        let mut mode_rx = backend.subscribe_mode();
         loop {
-            if backend.is_service_pipe_live().await {
+            let current = backend.current_backend();
+            let use_service = current == BackendMode::Service
+                || (!backend.embedded.is_engine_running()
+                    && backend.is_service_pipe_live().await);
+
+            if use_service {
                 if let Ok(mut pipe_rx) = backend.ipc.subscribe_events().await {
                     info!("GUI event stream attached to background service Named Pipe");
-                    while let Some(evt) = pipe_rx.recv().await {
-                        let _ = app.emit("bypath://event", &evt);
+                    loop {
+                        tokio::select! {
+                            maybe_evt = pipe_rx.recv() => {
+                                match maybe_evt {
+                                    Some(evt) => {
+                                        let _ = app.emit("bypath://event", &evt);
+                                    }
+                                    None => {
+                                        warn!("background service event stream disconnected; falling back");
+                                        break;
+                                    }
+                                }
+                            }
+                            changed = mode_rx.changed() => {
+                                if changed.is_err() || *mode_rx.borrow() == BackendMode::Embedded {
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    warn!("background service event stream disconnected; falling back");
+                    continue;
                 }
             }
 
@@ -713,6 +1278,11 @@ fn spawn_event_forwarder(app: AppHandle, backend: Arc<AppBackend>) {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                changed = mode_rx.changed() => {
+                    if changed.is_err() {
+                        break;
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -940,39 +1510,45 @@ fn setup_tray(app: &AppHandle, backend: Arc<AppBackend>) -> tauri::Result<()> {
 }
 
 #[cfg(windows)]
-struct SingleInstanceGuard(windows::Win32::Foundation::HANDLE);
+struct SingleInstanceGuard(isize);
 
 #[cfg(windows)]
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
-        if !self.0.is_invalid() {
+        if self.0 != 0 && self.0 != -1 {
             unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(self.0);
+                let handle = windows::Win32::Foundation::HANDLE(self.0 as *mut std::ffi::c_void);
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
             }
         }
     }
 }
 
 #[cfg(windows)]
-fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+fn acquire_single_instance(wait_for_handoff: bool) -> Option<SingleInstanceGuard> {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    let name_w: Vec<u16> = SINGLE_INSTANCE_MUTEX
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name_w.as_ptr())) }.ok()?;
-    let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    if already_exists {
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(handle);
+    let name_w = to_wide_null(SINGLE_INSTANCE_MUTEX);
+    let max_attempts = if wait_for_handoff { 80 } else { 1 };
+
+    for attempt in 0..max_attempts {
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name_w.as_ptr())) }.ok()?;
+        let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        if !already_exists {
+            return Some(SingleInstanceGuard(handle.0 as isize));
         }
-        notify_existing_instance();
-        return None;
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if attempt + 1 < max_attempts {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-    Some(SingleInstanceGuard(handle))
+
+    notify_existing_instance();
+    None
 }
 
 #[cfg(windows)]
@@ -1025,13 +1601,36 @@ fn spawn_focus_listener(app: AppHandle) {
 }
 
 pub fn run() {
+    run_with_args(&[]);
+}
+
+pub fn run_with_args(args: &[String]) {
+    let launch_opts = LaunchOptions::parse(args);
+
     #[cfg(windows)]
-    let _single_instance_guard = match acquire_single_instance() {
-        Some(g) => g,
-        None => return,
+    let single_instance_guard = if launch_opts.audit_instance {
+        None
+    } else {
+        match acquire_single_instance(launch_opts.handoff) {
+            Some(g) => Some(g),
+            None => return,
+        }
     };
 
-    let backend = Arc::new(AppBackend::new().expect("failed to initialize AppBackend"));
+    let initial_mode = if launch_opts.start_foreground {
+        BackendMode::Embedded
+    } else {
+        BackendMode::Service
+    };
+
+    let backend = Arc::new(
+        AppBackend::new(
+            initial_mode,
+            #[cfg(windows)]
+            single_instance_guard,
+        )
+        .expect("failed to initialize AppBackend"),
+    );
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
@@ -1046,15 +1645,53 @@ pub fn run() {
 
     let backend_for_close = Arc::clone(&backend);
     let backend_for_exit = Arc::clone(&backend);
+    let start_foreground = launch_opts.start_foreground;
+    let start_minimized = launch_opts.minimized;
+    let audit_instance = launch_opts.audit_instance;
 
     let app = tauri::Builder::default()
         .manage(Arc::clone(&backend))
         .setup(move |app| {
             let handle = app.handle().clone();
-            setup_tray(&handle, Arc::clone(&backend))?;
+            if !audit_instance {
+                setup_tray(&handle, Arc::clone(&backend))?;
+                #[cfg(windows)]
+                spawn_focus_listener(handle.clone());
+            }
+            if start_minimized && !audit_instance {
+                if let Some(win) = handle.get_webview_window("main") {
+                    if backend.minimize_to_tray.load(Ordering::Relaxed) {
+                        let _ = win.hide();
+                    } else {
+                        let _ = win.minimize();
+                    }
+                }
+            }
             spawn_event_forwarder(handle.clone(), Arc::clone(&backend));
-            #[cfg(windows)]
-            spawn_focus_listener(handle);
+
+            if start_foreground {
+                let bg = Arc::clone(&backend);
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if bg.is_service_pipe_live().await {
+                        if let Ok(IpcResponse::Status { status }) =
+                            bg.ipc.request(&IpcRequest::GetStatus).await
+                        {
+                            if status.engine_running {
+                                let _ = bg.ipc.request(&IpcRequest::StopEngine).await;
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                            }
+                        }
+                    }
+                    let _ = bg.embedded.reload_config_from_disk();
+                    bg.set_active_backend(BackendMode::Embedded);
+                    if let Err(err) = bg.embedded.start_engine().await {
+                        warn!(error = %err, "failed to auto-start foreground mode after elevation");
+                    }
+                    let _ = h.emit("bypath://refresh", ());
+                });
+            }
+
             Ok(())
         })
         .on_window_event(move |window, event| match event {
@@ -1066,7 +1703,8 @@ pub fn run() {
                     }
                     return;
                 }
-                let should_hide = !backend_for_close.allow_exit.load(Ordering::SeqCst)
+                let should_hide = !audit_instance
+                    && !backend_for_close.allow_exit.load(Ordering::SeqCst)
                     && backend_for_close.minimize_to_tray.load(Ordering::Relaxed);
                 if should_hide {
                     api.prevent_close();
@@ -1096,6 +1734,7 @@ pub fn run() {
             save_config,
             start_engine,
             stop_engine,
+            set_run_mode,
             get_connections,
             clear_connections,
             list_processes,
@@ -1119,6 +1758,8 @@ pub fn run() {
             check_for_updates,
             open_external_url,
             pick_directory,
+            get_launch_at_login,
+            set_launch_at_login,
             get_service_status,
             manage_windows_service,
         ])
@@ -1138,7 +1779,41 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_tray_popup_position;
+    use super::{
+        compute_tray_popup_position, format_startup_command, is_startup_approved_bytes,
+        LaunchOptions,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn parses_launch_options_flags() {
+        let opts = LaunchOptions::parse(&[
+            "--start-foreground".into(),
+            "--handoff".into(),
+            "--minimized".into(),
+            "--unknown".into(),
+        ]);
+        assert!(opts.start_foreground);
+        assert!(opts.handoff);
+        assert!(opts.minimized);
+        assert!(!opts.audit_instance);
+
+        let audit = LaunchOptions::parse(&["--audit-instance".into()]);
+        assert!(!audit.start_foreground);
+        assert!(!audit.handoff);
+        assert!(!audit.minimized);
+        assert!(audit.audit_instance);
+    }
+
+    #[test]
+    fn formats_quoted_startup_command_and_parses_approval_bytes() {
+        let cmd = format_startup_command(Path::new(r"C:\Program Files\Bypath\bypath-gui.exe"));
+        assert_eq!(cmd, r#""C:\Program Files\Bypath\bypath-gui.exe" --minimized"#);
+
+        assert!(is_startup_approved_bytes(&[0x02, 0x00, 0x00, 0x00]));
+        assert!(!is_startup_approved_bytes(&[0x03, 0x00, 0x00, 0x00]));
+        assert!(is_startup_approved_bytes(&[]));
+    }
 
     #[test]
     fn positions_above_bottom_taskbar_and_clamps_right_edge() {

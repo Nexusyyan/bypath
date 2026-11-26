@@ -1,6 +1,7 @@
-export const APP_VERSION = "0.4.1";
+export const APP_VERSION = "0.4.2";
 
 export type BackendMode = "service" | "embedded";
+export type ProxyRunMode = "off" | "foreground" | "background";
 export type ProxyKind = "socks5" | "http";
 export type RuleAction = "proxy" | "direct" | "block";
 export type ConnectionProtocol = "tcp" | "udp" | "quic";
@@ -230,6 +231,12 @@ export interface ServiceStateSummary {
   installed: boolean;
   running: boolean;
   state: string;
+}
+
+export interface SetRunModeResult {
+  mode: ProxyRunMode;
+  elevating: boolean;
+  status: DaemonStatus;
 }
 
 export interface UpdateCheckReport {

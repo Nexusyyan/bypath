@@ -14,9 +14,11 @@ import type {
   PresetInfo,
   ProcessEntry,
   ProxyConfig,
+  ProxyRunMode,
   RuleTestQuery,
   RuleTestReport,
   ServiceStateSummary,
+  SetRunModeResult,
   SystemProxyInfo,
   TrayStatePayload,
   UiPrefsSyncPayload,
@@ -158,7 +160,24 @@ let previewConfig: Config = {
   ],
 };
 
-let previewRunning = true;
+const previewScenario =
+  typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search).get("preview")
+    : null;
+
+let previewRunMode: ProxyRunMode =
+  previewScenario === "standard-stopped"
+    ? "off"
+    : previewScenario === "foreground"
+      ? "foreground"
+      : previewScenario === "off"
+        ? "off"
+        : "background";
+let previewElevated = previewScenario !== "standard-stopped";
+let previewServiceInstalled = previewScenario !== "fresh";
+let previewServiceRunning =
+  previewScenario !== "standard-stopped" && previewScenario !== "fresh";
+let previewLaunchAtLogin = false;
 const now = Date.now();
 let previewConnections: ConnectionRecord[] = [
   {
@@ -166,7 +185,7 @@ let previewConnections: ConnectionRecord[] = [
     pid: 43180,
     process_name: "language_server.exe",
     exe_path:
-      "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
+      "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
     protocol: "tcp",
     src_addr: "192.168.1.24:58412",
     dst_ip: "142.250.199.42",
@@ -189,7 +208,7 @@ let previewConnections: ConnectionRecord[] = [
     pid: 43180,
     process_name: "language_server.exe",
     exe_path:
-      "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
+      "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
     protocol: "tcp",
     src_addr: "192.168.1.24:58398",
     dst_ip: "172.217.160.106",
@@ -212,7 +231,7 @@ let previewConnections: ConnectionRecord[] = [
     pid: 43180,
     process_name: "language_server.exe",
     exe_path:
-      "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
+      "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe",
     protocol: "tcp",
     src_addr: "192.168.1.24:58355",
     dst_ip: "142.250.71.110",
@@ -249,45 +268,60 @@ const previewLogs: LogEntry[] = [
   },
 ];
 
+function buildPreviewStatus(): DaemonStatus {
+  const running = previewRunMode !== "off";
+  const active = previewConnections.filter((c) => c.state === "active").length;
+  const blocked = previewConnections.filter((c) => c.state === "blocked").length;
+  const backendMode =
+    previewRunMode === "foreground"
+      ? "embedded"
+      : previewServiceRunning
+        ? "service"
+        : "embedded";
+  const effectiveElevated = backendMode === "service" || previewElevated;
+  const driverReady = effectiveElevated;
+  return {
+    backend_mode: backendMode,
+    daemon_pid: backendMode === "service" ? 18420 : 24910,
+    elevated: effectiveElevated,
+    service_installed: previewServiceInstalled,
+    service_running: previewServiceRunning,
+    engine_running: running,
+    windivert_ready: driverReady,
+    windivert_dll_path: "runtime\\windivert\\WinDivert.dll",
+    windivert_version: driverReady ? "v2.2" : null,
+    windivert_error: driverReady
+      ? null
+      : "WinDivertOpen(layer=0, filter='false') failed with OS error 5 (Access Denied).",
+    windivert_error_kind: driverReady ? null : "access_denied",
+    portable_mode: false,
+    config_path: "C:\\ProgramData\\Bypath\\config.toml",
+    active_rules_count: previewConfig.rules.filter((r) => r.enabled).length,
+    total_rules_count: previewConfig.rules.length,
+    proxies_count: Object.keys(previewConfig.proxies).length,
+    last_error: null,
+    stats: {
+      running,
+      uptime_secs: running ? 842 : 0,
+      active_connections: running ? active : 0,
+      total_connections: previewConnections.length,
+      proxied_connections: previewConnections.length - blocked,
+      blocked_connections: blocked,
+      direct_packets: 12_480,
+      total_bytes_tx: 68_160,
+      total_bytes_rx: 797_380,
+      tx_bytes_per_sec: running ? 6_420 : 0,
+      rx_bytes_per_sec: running ? 48_960 : 0,
+    },
+  };
+}
+
 export const api = {
   async getStatus(): Promise<DaemonStatus> {
     if (isTauriRuntime()) {
       return invoke<DaemonStatus>("get_status");
     }
-    const active = previewConnections.filter((c) => c.state === "active").length;
-    const blocked = previewConnections.filter((c) => c.state === "blocked").length;
-    return {
-      backend_mode: "service",
-      daemon_pid: 18420,
-      elevated: true,
-      service_installed: true,
-      service_running: true,
-      engine_running: previewRunning,
-      windivert_ready: true,
-      windivert_dll_path: "runtime/windivert\\WinDivert.dll",
-      windivert_version: "v2.2",
-      windivert_error: null,
-      windivert_error_kind: null,
-      portable_mode: false,
-      config_path: "C:\\ProgramData\\Bypath\\config.toml",
-      active_rules_count: previewConfig.rules.filter((r) => r.enabled).length,
-      total_rules_count: previewConfig.rules.length,
-      proxies_count: Object.keys(previewConfig.proxies).length,
-      last_error: null,
-      stats: {
-        running: previewRunning,
-        uptime_secs: previewRunning ? 842 : 0,
-        active_connections: previewRunning ? active : 0,
-        total_connections: previewConnections.length,
-        proxied_connections: previewConnections.length - blocked,
-        blocked_connections: blocked,
-        direct_packets: 12_480,
-        total_bytes_tx: 68_160,
-        total_bytes_rx: 797_380,
-        tx_bytes_per_sec: previewRunning ? 6_420 : 0,
-        rx_bytes_per_sec: previewRunning ? 48_960 : 0,
-      },
-    };
+    return buildPreviewStatus();
   },
 
   async getConfig(): Promise<ConfigSnapshot> {
@@ -312,7 +346,8 @@ export const api = {
     if (isTauriRuntime()) {
       return invoke<string>("start_engine");
     }
-    previewRunning = true;
+    previewRunMode = previewServiceRunning ? "background" : "foreground";
+    previewElevated = true;
     return "engine started";
   },
 
@@ -320,8 +355,29 @@ export const api = {
     if (isTauriRuntime()) {
       return invoke<string>("stop_engine");
     }
-    previewRunning = false;
+    previewRunMode = "off";
     return "engine stopped";
+  },
+
+  async setRunMode(mode: ProxyRunMode): Promise<SetRunModeResult> {
+    if (isTauriRuntime()) {
+      return invoke<SetRunModeResult>("set_run_mode", { mode });
+    }
+    if (mode === "off") {
+      previewRunMode = "off";
+    } else if (mode === "foreground") {
+      previewElevated = true;
+      previewRunMode = "foreground";
+    } else {
+      previewServiceInstalled = true;
+      previewServiceRunning = true;
+      previewRunMode = "background";
+    }
+    return {
+      mode,
+      elevating: false,
+      status: buildPreviewStatus(),
+    };
   },
 
   async getConnections(): Promise<ConnectionRecord[]> {
@@ -351,14 +407,14 @@ export const api = {
         parent_pid: 4120,
         name: "Antigravity.exe",
         exe_path:
-          "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe",
+          "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe",
         matched_rule: "Preset: Antigravity",
       },
       {
         pid: 22410,
         parent_pid: 4120,
         name: "Code.exe",
-        exe_path: "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+        exe_path: "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
         matched_rule: null,
       },
     ];
@@ -376,14 +432,15 @@ export const api = {
     if (isTauriRuntime()) {
       return invoke<DoctorReport>("run_doctor");
     }
+    const st = buildPreviewStatus();
     return {
-      elevated: true,
+      elevated: st.elevated,
       windivert_dll_loaded: true,
-      windivert_dll_path: "runtime/windivert\\WinDivert.dll",
-      windivert_driver_opened: true,
-      windivert_version: "v2.2",
-      windivert_error: null,
-      windivert_error_kind: null,
+      windivert_dll_path: st.windivert_dll_path,
+      windivert_driver_opened: st.windivert_ready,
+      windivert_version: st.windivert_version,
+      windivert_error: st.windivert_error,
+      windivert_error_kind: st.windivert_error_kind,
       proxies: Object.entries(previewConfig.proxies).map(([name, p]) => ({
         name,
         report: {
@@ -553,11 +610,11 @@ export const api = {
       return invoke<UpdateCheckReport>("check_for_updates");
     }
     return {
-      current_version: "0.4.1",
-      latest_version: "0.4.1",
-      latest_tag: "v0.4.1",
+      current_version: "0.4.2",
+      latest_version: "0.4.2",
+      latest_tag: "v0.4.2",
       update_available: false,
-      release_name: "Bypath v0.4.1",
+      release_name: "Bypath v0.4.2",
       release_url: "https://github.com/Nexusyyan/bypath/releases",
       published_at: new Date().toISOString(),
       release_notes: null,
@@ -586,11 +643,34 @@ export const api = {
     return null;
   },
 
+  async getLaunchAtLogin(): Promise<boolean> {
+    if (isTauriRuntime()) {
+      return invoke<boolean>("get_launch_at_login");
+    }
+    return previewLaunchAtLogin;
+  },
+
+  async setLaunchAtLogin(enabled: boolean): Promise<boolean> {
+    if (isTauriRuntime()) {
+      return invoke<boolean>("set_launch_at_login", { enabled });
+    }
+    previewLaunchAtLogin = enabled;
+    return previewLaunchAtLogin;
+  },
+
   async getServiceStatus(): Promise<ServiceStateSummary> {
     if (isTauriRuntime()) {
       return invoke<ServiceStateSummary>("get_service_status");
     }
-    return { installed: true, running: true, state: "running" };
+    return {
+      installed: previewServiceInstalled,
+      running: previewServiceRunning,
+      state: !previewServiceInstalled
+        ? "not_installed"
+        : previewServiceRunning
+          ? "running"
+          : "stopped",
+    };
   },
 
   async manageWindowsService(
@@ -599,10 +679,19 @@ export const api = {
     if (isTauriRuntime()) {
       return invoke<ServiceStateSummary>("manage_windows_service", { action });
     }
+    previewServiceInstalled = action !== "uninstall";
+    previewServiceRunning = action === "install" || action === "start";
+    if (!previewServiceRunning && previewRunMode === "background") {
+      previewRunMode = "off";
+    }
     return {
-      installed: action !== "uninstall",
-      running: action === "install" || action === "start",
-      state: action === "uninstall" ? "not_installed" : action === "stop" ? "stopped" : "running",
+      installed: previewServiceInstalled,
+      running: previewServiceRunning,
+      state: !previewServiceInstalled
+        ? "not_installed"
+        : previewServiceRunning
+          ? "running"
+          : "stopped",
     };
   },
 

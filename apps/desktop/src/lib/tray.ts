@@ -1,7 +1,9 @@
-import type { Config, DaemonStatus } from "./types";
+import { deriveRunMode, needsDriverRecovery } from "./mode";
+import type { Config, DaemonStatus, ProxyRunMode } from "./types";
 
 export interface TraySummary {
   running: boolean;
+  runMode: ProxyRunMode;
   proxyAddress: string | null;
   activeConnections: number;
   enabledRules: number;
@@ -21,23 +23,23 @@ export function buildTraySummary(
   status: DaemonStatus | null,
   config: Config | null
 ): TraySummary {
-  const running = status?.engine_running ?? false;
+  const runMode = deriveRunMode(status);
+  const running = runMode !== "off";
   const proxyAddress = extractFirstProxyAddress(config);
   const enabledRules = config
     ? config.rules.filter((r) => r.enabled).length
     : status?.active_rules_count ?? 0;
-  const needsAttention = status
-    ? !status.windivert_ready || !(status.service_running || status.elevated)
-    : false;
+  const needsAttention = needsDriverRecovery(status);
   return {
     running,
+    runMode,
     proxyAddress,
     activeConnections: status?.stats.active_connections ?? 0,
     enabledRules,
     txBytesPerSec: status?.stats.tx_bytes_per_sec ?? 0,
     rxBytesPerSec: status?.stats.rx_bytes_per_sec ?? 0,
     needsAttention,
-    isServiceMode: status?.backend_mode === "service",
+    isServiceMode: runMode === "background",
   };
 }
 

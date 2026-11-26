@@ -10,19 +10,19 @@ import {
   LanguageIcon,
   MonitorIcon,
   MoonIcon,
-  PlayIcon,
   PowerIcon,
   RouteIcon,
   ShieldIcon,
-  StopIcon,
   SunIcon,
 } from "./Icons";
+import { ModeSwitcher } from "./ModeSwitcher";
 import { api } from "../lib/api";
 import { formatSpeed } from "../lib/format";
 import { useI18n } from "../lib/i18n";
+import { classifyDriverReadiness, classifyRuntimeError } from "../lib/mode";
 import { useTheme } from "../lib/theme";
 import { buildTraySummary, buildTrayTooltip } from "../lib/tray";
-import type { Config, DaemonStatus, EngineEvent, NavTab } from "../lib/types";
+import type { Config, DaemonStatus, EngineEvent, NavTab, ProxyRunMode } from "../lib/types";
 
 const TRAY_WINDOW_WIDTH = 288;
 
@@ -31,12 +31,24 @@ export function TrayMenu() {
   const { mode: themeMode, cycleMode } = useTheme();
   const [status, setStatus] = useState<DaemonStatus | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
-  const [toggling, setToggling] = useState(false);
+  const [switchingMode, setSwitchingMode] = useState<ProxyRunMode | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [openSeq, setOpenSeq] = useState(0);
 
   const shellRef = useRef<HTMLDivElement | null>(null);
   const lastHeightRef = useRef<number>(0);
+
+  const formatError = useCallback(
+    (raw: string): string => {
+      const code = classifyRuntimeError(raw);
+      if (code === "elevation_cancelled") return t("mode.errElevationCancelled");
+      if (code === "service_cancelled") return t("mode.errServiceCancelled");
+      if (code === "service_pipe_timeout") return t("mode.errServiceTimeout");
+      if (code === "access_denied") return t("mode.errAccessDenied");
+      return raw;
+    },
+    [t]
+  );
 
   const refreshState = useCallback(async () => {
     try {
@@ -45,9 +57,9 @@ export function TrayMenu() {
       setConfig(cfgSnap.config);
       setErrorMsg(null);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setErrorMsg(formatError(err instanceof Error ? err.message : String(err)));
     }
-  }, []);
+  }, [formatError]);
 
   useEffect(() => {
     void refreshState();
@@ -77,7 +89,7 @@ export function TrayMenu() {
                   : prev
               );
               if (evt.error) {
-                setErrorMsg(evt.error);
+                setErrorMsg(formatError(evt.error));
               }
               break;
             case "config_reloaded":
@@ -107,7 +119,7 @@ export function TrayMenu() {
       unlistenEvents?.();
       unlistenOpened?.();
     };
-  }, [refreshState]);
+  }, [formatError, refreshState]);
 
   // Auto-fit the transparent Tauri popup window height to exact rendered content.
   useEffect(() => {
@@ -127,37 +139,37 @@ export function TrayMenu() {
     const observer = new ResizeObserver(reportSize);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [locale, errorMsg, status?.engine_running]);
+  }, [locale, errorMsg, status?.engine_running, status?.backend_mode]);
 
   const summary = buildTraySummary(status, config);
+  const driverReadiness = classifyDriverReadiness(status);
   const proxiesCount = config ? Object.keys(config.proxies).length : status?.proxies_count ?? 0;
 
-  // Keep native tray hover tooltip synced even if toggled directly from the tray popover.
+  // Keep native tray hover tooltip synced even if switched directly from the tray popover.
   useEffect(() => {
     if (!status && !config) return;
     const proxyLabel = summary.proxyAddress ?? "-";
-    const tooltip = buildTrayTooltip(
-      summary.running,
-      t("tray.statusRunning", { proxy: proxyLabel }),
-      t("tray.statusStandby")
-    );
+    const runningLabel =
+      summary.runMode === "background"
+        ? t("tray.statusBackground", { proxy: proxyLabel })
+        : t("tray.statusForeground", { proxy: proxyLabel });
+    const tooltip = buildTrayTooltip(summary.running, runningLabel, t("tray.statusOff"));
     void api.setTrayState({ tooltip });
-  }, [locale, status, config, summary.running, summary.proxyAddress, t]);
+  }, [locale, status, config, summary.running, summary.runMode, summary.proxyAddress, t]);
 
-  const handleToggleEngine = async () => {
-    setToggling(true);
+  const handleSelectMode = async (target: ProxyRunMode) => {
+    setSwitchingMode(target);
     setErrorMsg(null);
     try {
-      if (summary.running) {
-        await api.stopEngine();
-      } else {
-        await api.startEngine();
+      const res = await api.setRunMode(target);
+      setStatus(res.status);
+      if (!res.elevating) {
+        await refreshState();
       }
-      await refreshState();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setErrorMsg(formatError(err instanceof Error ? err.message : String(err)));
     } finally {
-      setToggling(false);
+      setSwitchingMode(null);
     }
   };
 
@@ -212,8 +224,7 @@ export function TrayMenu() {
       return;
     }
     if (e.key === "ArrowUp") {
-      const prev =
-        currentIdx <= 0 ? items.length - 1 : currentIdx - 1;
+      const prev = currentIdx <= 0 ? items.length - 1 : currentIdx - 1;
       items[prev].focus();
     }
   };
@@ -231,30 +242,25 @@ export function TrayMenu() {
       ? "dot-warn"
       : "dot-idle";
 
+  const statusBadgeLabel =
+    summary.runMode === "background"
+      ? t("mode.backgroundActive")
+      : summary.runMode === "foreground"
+        ? t("mode.foregroundActive")
+        : t("mode.offTitle");
+
   return (
-    <div
-      ref={shellRef}
-      className="tray-shell"
-      onKeyDown={handleKeyDown}
-    >
-      <div
-        key={openSeq}
-        className="tray-card"
-        role="menu"
-        aria-label={t("tray.menuAria")}
-      >
+    <div ref={shellRef} className="tray-shell" onKeyDown={handleKeyDown}>
+      <div key={openSeq} className="tray-card" role="menu" aria-label={t("tray.menuAria")}>
         <div className="tray-header">
           <div className="tray-brand-row">
             <div className="tray-brand-left">
               <BrandMark size={18} />
               <span className="tray-brand-name">{t("app.name")}</span>
-              <span className="mode-chip">
-                {summary.isServiceMode ? t("mode.service") : t("mode.local")}
-              </span>
             </div>
             <div className="tray-status-badge">
               <span className={`dot ${statusDotClass}`} />
-              <span>{summary.running ? t("engine.running") : t("engine.standby")}</span>
+              <span>{statusBadgeLabel}</span>
             </div>
           </div>
 
@@ -297,11 +303,13 @@ export function TrayMenu() {
                         <span className="dot dot-warn" />
                         <span>{t("tray.driverAttention")}</span>
                       </>
+                    ) : driverReadiness === "files_ready_needs_privilege" ? (
+                      <span>{t("tray.driverFilesReady")}</span>
                     ) : (
                       <span className="mono">
                         {status?.windivert_version
                           ? `WinDivert ${status.windivert_version}`
-                          : t("engine.standby")}
+                          : t("tray.statusOff")}
                       </span>
                     )}
                   </span>
@@ -322,26 +330,13 @@ export function TrayMenu() {
             </button>
           )}
 
-          <button
-            type="button"
-            role="menuitem"
-            data-tray-focusable="true"
-            className={`engine-cta tray-cta ${summary.running ? "stop" : "start"}`}
-            disabled={toggling}
-            onClick={() => void handleToggleEngine()}
-          >
-            {summary.running ? (
-              <>
-                <StopIcon size={11} />
-                <span>{toggling ? t("engine.stopping") : t("tray.stop")}</span>
-              </>
-            ) : (
-              <>
-                <PlayIcon size={11} />
-                <span>{toggling ? t("engine.starting") : t("tray.start")}</span>
-              </>
-            )}
-          </button>
+          <ModeSwitcher
+            mode={summary.runMode}
+            switchingTo={switchingMode}
+            status={status}
+            compact
+            onSelectMode={(target) => void handleSelectMode(target)}
+          />
         </div>
 
         <div className="tray-divider" />

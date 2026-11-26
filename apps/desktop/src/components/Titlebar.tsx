@@ -15,6 +15,7 @@ import {
 } from "./Icons";
 import { isTauriRuntime } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { deriveRunMode } from "../lib/mode";
 import { useTheme } from "../lib/theme";
 import type { DaemonStatus } from "../lib/types";
 
@@ -68,6 +69,14 @@ export function Titlebar({
     void getCurrentWindow().close();
   };
 
+  const runMode = deriveRunMode(status);
+  const statusLabel =
+    runMode === "background"
+      ? t("mode.backgroundActive")
+      : runMode === "foreground"
+        ? t("mode.foregroundActive")
+        : t("mode.offTitle");
+
   const themeTitle = `${t("topbar.switchTheme")} (${
     mode === "dark" ? t("theme.dark") : mode === "light" ? t("theme.light") : t("theme.system")
   })`;
@@ -80,9 +89,6 @@ export function Titlebar({
           <span className="brand-title" data-tauri-drag-region>
             {t("app.name")}
           </span>
-          <span className="mode-chip">
-            {status?.backend_mode === "service" ? t("mode.service") : t("mode.local")}
-          </span>
         </div>
 
         <span className="titlebar-section" data-tauri-drag-region>
@@ -94,11 +100,9 @@ export function Titlebar({
 
       <div className="titlebar-right">
         <span className="status-inline" data-tauri-drag-region>
-          <span
-            className={`dot ${status?.engine_running ? "dot-ok" : "dot-idle"}`}
-          />
+          <span className={`dot ${runMode !== "off" ? "dot-ok" : "dot-idle"}`} />
           <span>
-            {status?.engine_running ? t("engine.active") : t("engine.standby")}
+            {statusLabel}
             {firstProxyAddress ? ` / ${firstProxyAddress}` : ""}
           </span>
         </span>

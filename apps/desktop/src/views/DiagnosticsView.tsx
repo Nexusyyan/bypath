@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpRightIcon,
   CopyIcon,
@@ -10,6 +10,11 @@ import {
 import { api } from "../lib/api";
 import { formatTime } from "../lib/format";
 import { useI18n } from "../lib/i18n";
+import {
+  classifyDoctorDriverReadiness,
+  classifyRuntimeError,
+  deriveRunMode,
+} from "../lib/mode";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import {
   APP_VERSION,
@@ -18,6 +23,7 @@ import {
   type DaemonStatus,
   type DoctorReport,
   type LogEntry,
+  type ProxyRunMode,
   type ServiceStateSummary,
   type UpdateCheckReport,
 } from "../lib/types";
@@ -28,9 +34,11 @@ interface DiagnosticsViewProps {
   configPath: string;
   logs: LogEntry[];
   saving: boolean;
+  switchingMode: ProxyRunMode | null;
   updateReport: UpdateCheckReport | null;
   checkingUpdates: boolean;
   updateError: string | null;
+  onSelectMode: (target: ProxyRunMode) => void;
   onCheckUpdates: () => void;
   onSaveConfig: (next: Config, toast?: string) => Promise<void>;
   onRefreshStatus: () => Promise<void>;
@@ -47,9 +55,11 @@ export function DiagnosticsView({
   configPath,
   logs,
   saving,
+  switchingMode,
   updateReport,
   checkingUpdates,
   updateError,
+  onSelectMode,
   onCheckUpdates,
   onSaveConfig,
   onRefreshStatus,
@@ -62,6 +72,8 @@ export function DiagnosticsView({
   const [serviceState, setServiceState] = useState<ServiceStateSummary | null>(null);
   const [serviceBusy, setServiceBusy] = useState(false);
   const [serviceError, setServiceError] = useState<string | null>(null);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [togglingLaunchAtLogin, setTogglingLaunchAtLogin] = useState(false);
   const [windivertDir, setWindivertDir] = useState(config.general.windivert_dir);
   const [logLevel, setLogLevel] = useState<LogLevelFilter>("ALL");
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
@@ -71,25 +83,27 @@ export function DiagnosticsView({
     setWindivertDir(config.general.windivert_dir);
   }, [config.general.windivert_dir]);
 
-  const runChecks = async () => {
+  const runChecks = useCallback(async () => {
     setRunningDoctor(true);
     try {
-      const [doc, svc, agent] = await Promise.all([
+      const [doc, svc, agent, startupEnabled] = await Promise.all([
         api.runDoctor(),
         api.getServiceStatus(),
         api.getAgentInfo(),
+        api.getLaunchAtLogin().catch(() => false),
       ]);
       setDoctor(doc);
       setServiceState(svc);
       setAgentInfo(agent);
+      setLaunchAtLogin(startupEnabled);
     } finally {
       setRunningDoctor(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void runChecks();
-  }, []);
+  }, [runChecks, status?.backend_mode, status?.engine_running, status?.service_running]);
 
   const handleServiceAction = async (
     action: "install" | "start" | "stop" | "uninstall"
@@ -102,9 +116,33 @@ export function DiagnosticsView({
       await onRefreshStatus();
       await runChecks();
     } catch (err) {
-      setServiceError(err instanceof Error ? err.message : String(err));
+      const raw = err instanceof Error ? err.message : String(err);
+      const code = classifyRuntimeError(raw);
+      setServiceError(
+        code === "service_cancelled"
+          ? t("mode.errServiceCancelled")
+          : code === "elevation_cancelled"
+            ? t("mode.errElevationCancelled")
+            : raw
+      );
     } finally {
       setServiceBusy(false);
+    }
+  };
+
+  const handleToggleLaunchAtLogin = async () => {
+    setTogglingLaunchAtLogin(true);
+    try {
+      const nextVal = await api.setLaunchAtLogin(!launchAtLogin);
+      setLaunchAtLogin(nextVal);
+      onNotify(
+        nextVal ? t("diag.toastLaunchAtLoginOn") : t("diag.toastLaunchAtLoginOff"),
+        false
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      setTogglingLaunchAtLogin(false);
     }
   };
 
@@ -250,28 +288,208 @@ export function DiagnosticsView({
     copyText(summary);
   };
 
-  const formatServiceBadge = (state: string | undefined): string => {
-    switch (state) {
-      case "running":
-        return t("diag.svcStateRunning");
-      case "stopped":
-        return t("diag.svcStateStopped");
-      case "start_pending":
-        return t("diag.svcStateStartPending");
-      case "stop_pending":
-        return t("diag.svcStateStopPending");
-      default:
-        return t("diag.svcStateNotInstalled");
-    }
-  };
+  const runMode = deriveRunMode(status);
+  const effectiveServiceRunning = serviceState?.running ?? status?.service_running ?? false;
+  const effectiveServiceInstalled = serviceState?.installed ?? status?.service_installed ?? false;
+  const driverReadiness = classifyDoctorDriverReadiness(doctor, effectiveServiceRunning);
+  const driverBlocked = driverReadiness === "blocked_by_security";
+  const modeBusy = switchingMode !== null || serviceBusy;
 
-  const driverBlocked =
-    doctor?.windivert_error_kind === "blocked_by_security" ||
-    doctor?.windivert_error_kind === "invalid_signature" ||
-    doctor?.windivert_error_kind === "missing_sys";
+  const bgTagLabel =
+    runMode === "background"
+      ? t("diag.modeBgTagActive")
+      : effectiveServiceRunning
+        ? t("diag.modeBgTagStandby")
+        : effectiveServiceInstalled
+          ? t("diag.modeBgTagStopped")
+          : t("diag.modeBgTagNotInstalled");
+
+  const fgTagLabel =
+    runMode === "foreground"
+      ? t("diag.modeFgTagActive")
+      : status?.elevated
+        ? t("diag.modeFgTagReady")
+        : t("diag.modeFgTagNeedsUac");
+
+  const contextDesc =
+    runMode === "background"
+      ? t("diag.contextBgActive")
+      : runMode === "foreground"
+        ? t("diag.contextFgActive")
+        : effectiveServiceRunning
+          ? t("diag.contextOffService")
+          : status?.elevated
+            ? t("diag.contextOffAdmin")
+            : t("diag.contextOffStandard");
+
+  const contextTag =
+    runMode === "background"
+      ? t("diag.tagBackground")
+      : runMode === "foreground"
+        ? t("diag.tagForeground")
+        : t("diag.tagOff");
+
+  const driverDotClass =
+    driverReadiness === "ready"
+      ? "dot-ok"
+      : driverReadiness === "files_ready_needs_privilege" || driverReadiness === "unknown"
+        ? "dot-idle"
+        : "dot-err";
+
+  const driverTagLabel =
+    driverReadiness === "ready"
+      ? doctor?.windivert_version ?? t("diag.tagReady")
+      : driverReadiness === "files_ready_needs_privilege"
+        ? t("diag.tagFilesReady")
+        : driverReadiness === "blocked_by_security"
+          ? t("diag.tagBlocked")
+          : driverReadiness === "missing"
+            ? t("diag.tagMissing")
+            : t("diag.tagError");
 
   return (
     <div className="view-container">
+      <section>
+        <div className="section-head">
+          <div>
+            <h2 className="section-title">{t("diag.modesTitle")}</h2>
+            <p className="section-desc">{t("diag.modesDesc")}</p>
+          </div>
+          <span className="tag tag-mono">
+            <span
+              className={`dot ${runMode !== "off" ? "dot-ok" : "dot-idle"}`}
+              aria-hidden="true"
+            />
+            <span>{contextTag}</span>
+          </span>
+        </div>
+
+        {serviceError && (
+          <div className="notice-bar error" style={{ marginBottom: 12 }}>
+            <span>{serviceError}</span>
+          </div>
+        )}
+
+        <div className="mode-cards-grid">
+          <div className={`mode-card ${runMode === "foreground" ? "active" : ""}`}>
+            <div className="mode-card-head">
+              <div className="mode-card-title-group">
+                <span
+                  className={`dot ${runMode === "foreground" ? "dot-ok" : "dot-idle"}`}
+                  aria-hidden="true"
+                />
+                <span className="mode-card-title">{t("diag.modeFgTitle")}</span>
+                <span className="mode-card-sub">{t("diag.modeFgSubtitle")}</span>
+              </div>
+              <span className="tag tag-mono">{fgTagLabel}</span>
+            </div>
+
+            <p className="mode-card-desc">{t("diag.modeFgDesc")}</p>
+            <div className="mode-card-meta">
+              {status?.elevated ? t("diag.modeFgMetaAdmin") : t("diag.modeFgMetaStandard")}
+            </div>
+
+            <div className="mode-card-actions">
+              {runMode === "foreground" ? (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline"
+                  disabled={modeBusy}
+                  onClick={() => onSelectMode("off")}
+                >
+                  {t("diag.modeBtnStop")}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline"
+                  disabled={modeBusy}
+                  onClick={() => onSelectMode("foreground")}
+                >
+                  {switchingMode === "foreground"
+                    ? status?.elevated
+                      ? t("mode.switchingForeground")
+                      : t("mode.switchingForegroundUac")
+                    : status?.elevated
+                      ? t("diag.modeFgBtnStart")
+                      : t("diag.modeFgBtnElevate")}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className={`mode-card ${runMode === "background" ? "active" : ""}`}>
+            <div className="mode-card-head">
+              <div className="mode-card-title-group">
+                <span
+                  className={`dot ${runMode === "background" ? "dot-ok" : "dot-idle"}`}
+                  aria-hidden="true"
+                />
+                <span className="mode-card-title">{t("diag.modeBgTitle")}</span>
+                <span className="mode-card-sub">{t("diag.modeBgSubtitle")}</span>
+              </div>
+              <span className="tag tag-mono">{bgTagLabel}</span>
+            </div>
+
+            <p className="mode-card-desc">{t("diag.modeBgDesc")}</p>
+            <div className="mode-card-meta mono" title={configPath}>
+              {t("diag.serviceMeta", { path: configPath })}
+            </div>
+
+            <div className="mode-card-actions">
+              <div className="toolbar-group">
+                {runMode === "background" ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    disabled={modeBusy}
+                    onClick={() => onSelectMode("off")}
+                  >
+                    {t("diag.modeBtnStop")}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    disabled={modeBusy}
+                    onClick={() => onSelectMode("background")}
+                  >
+                    {switchingMode === "background"
+                      ? t("mode.switchingBackground")
+                      : effectiveServiceInstalled
+                        ? t("diag.modeBgBtnStart")
+                        : t("diag.modeBgBtnInstall")}
+                  </button>
+                )}
+              </div>
+
+              {effectiveServiceInstalled && (
+                <div className="toolbar-group">
+                  {effectiveServiceRunning && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost"
+                      disabled={modeBusy}
+                      onClick={() => void handleServiceAction("stop")}
+                    >
+                      {t("diag.serviceLifecycleStop")}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger-ghost"
+                    disabled={modeBusy}
+                    onClick={() => void handleServiceAction("uninstall")}
+                  >
+                    {t("diag.serviceLifecycleUninstall")}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section>
         <div className="section-head">
           <div>
@@ -293,45 +511,35 @@ export function DiagnosticsView({
           <div className="row-item">
             <div className="row-item-main">
               <div className="row-item-title">
-                <span className={`dot ${doctor?.elevated ? "dot-ok" : "dot-warn"}`} />
+                <span className={`dot ${runMode !== "off" ? "dot-ok" : "dot-idle"}`} />
                 <span>{t("diag.contextTitle")}</span>
               </div>
-              <div className="row-item-sub">
-                {doctor?.elevated
-                  ? status?.backend_mode === "service"
-                    ? t("diag.contextService")
-                    : t("diag.contextAdmin")
-                  : t("diag.contextStandard")}
-              </div>
+              <div className="row-item-sub">{contextDesc}</div>
             </div>
-            <span className="tag tag-mono">
-              {status?.backend_mode === "service"
-                ? t("diag.tagIpcService")
-                : t("diag.tagLocal")}
-            </span>
+            <span className="tag tag-mono">{contextTag}</span>
           </div>
 
           <div className="row-item">
             <div className="row-item-main">
               <div className="row-item-title">
-                <span
-                  className={`dot ${
-                    doctor?.windivert_driver_opened
-                      ? "dot-ok"
-                      : doctor?.windivert_dll_loaded
-                        ? "dot-warn"
-                        : "dot-err"
-                  }`}
-                />
+                <span className={`dot ${driverDotClass}`} />
                 <span>{t("diag.driverTitle")}</span>
               </div>
-              <div className="row-item-sub mono">
-                {doctor?.windivert_driver_opened
+              <div
+                className={`row-item-sub ${
+                  driverReadiness === "ready" || driverReadiness === "error" ? "mono" : ""
+                }`}
+              >
+                {driverReadiness === "ready"
                   ? t("diag.driverOk", {
-                      path: doctor.windivert_dll_path ?? "WinDivert.dll",
-                      version: doctor.windivert_version ?? "v2.2",
+                      path: doctor?.windivert_dll_path ?? "WinDivert.dll",
+                      version: doctor?.windivert_version ?? "v2.2",
                     })
-                  : doctor?.windivert_error ?? t("diag.driverChecking")}
+                  : driverReadiness === "files_ready_needs_privilege"
+                    ? t("diag.driverFilesReady", {
+                        path: doctor?.windivert_dll_path ?? "runtime\\windivert\\WinDivert.dll",
+                      })
+                    : doctor?.windivert_error ?? t("diag.driverChecking")}
               </div>
               {driverBlocked && (
                 <div className="row-item-sub" style={{ marginTop: 4 }}>
@@ -349,13 +557,16 @@ export function DiagnosticsView({
                   {t("diag.openSecurity")}
                 </button>
               )}
-              <span className="tag tag-mono">
-                {doctor?.windivert_driver_opened
-                  ? doctor.windivert_version ?? t("diag.tagReady")
-                  : doctor?.windivert_dll_loaded
-                    ? t("diag.tagNeedsAdmin")
-                    : t("diag.tagMissing")}
-              </span>
+              {driverReadiness === "missing" && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline"
+                  onClick={() => void handleBrowseWindivert()}
+                >
+                  {t("setup.pickDriverDir")}
+                </button>
+              )}
+              <span className="tag tag-mono">{driverTagLabel}</span>
             </div>
           </div>
 
@@ -394,89 +605,6 @@ export function DiagnosticsView({
               </div>
             );
           })}
-        </div>
-      </section>
-
-      <section>
-        <div className="section-head">
-          <div>
-            <h2 className="section-title">{t("diag.serviceTitle")}</h2>
-            <p className="section-desc">{t("diag.serviceDesc")}</p>
-          </div>
-        </div>
-
-        {serviceError && (
-          <div className="notice-bar error" style={{ marginBottom: 12 }}>
-            <span>{serviceError}</span>
-          </div>
-        )}
-
-        <div className="row-list">
-          <div className="row-item">
-            <div className="row-item-main">
-              <div className="row-item-title">
-                <span
-                  className={`dot ${
-                    serviceState?.running
-                      ? "dot-ok"
-                      : serviceState?.installed
-                        ? "dot-warn"
-                        : "dot-idle"
-                  }`}
-                />
-                <span>BypathService</span>
-                <span className="tag tag-mono">
-                  {formatServiceBadge(serviceState?.state)}
-                </span>
-              </div>
-              <div className="row-item-sub mono">
-                {t("diag.serviceMeta", { path: configPath })}
-              </div>
-            </div>
-
-            <div className="row-item-actions">
-              {!serviceState?.installed ? (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary"
-                  disabled={serviceBusy}
-                  onClick={() => void handleServiceAction("install")}
-                >
-                  {serviceBusy ? t("diag.serviceInstalling") : t("diag.serviceInstall")}
-                </button>
-              ) : (
-                <>
-                  {serviceState.running ? (
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-outline"
-                      disabled={serviceBusy}
-                      onClick={() => void handleServiceAction("stop")}
-                    >
-                      {t("diag.serviceStop")}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-primary"
-                      disabled={serviceBusy}
-                      onClick={() => void handleServiceAction("start")}
-                    >
-                      {t("diag.serviceStart")}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-danger-ghost"
-                    disabled={serviceBusy}
-                    onClick={() => void handleServiceAction("uninstall")}
-                  >
-                    {t("diag.serviceUninstall")}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
         </div>
       </section>
 
@@ -654,6 +782,22 @@ export function DiagnosticsView({
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="row-item">
+            <div className="row-item-main">
+              <div className="row-item-title">{t("diag.launchAtLoginTitle")}</div>
+              <div className="row-item-sub">{t("diag.launchAtLoginDesc")}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={launchAtLogin}
+              aria-label={t("diag.launchAtLoginTitle")}
+              className="switch"
+              disabled={togglingLaunchAtLogin}
+              onClick={() => void handleToggleLaunchAtLogin()}
+            />
           </div>
 
           <div className="row-item">
