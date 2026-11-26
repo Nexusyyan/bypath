@@ -19,15 +19,21 @@ use bypath_windivert::is_elevated;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, RunEvent, State, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+const TRAY_WINDOW_LABEL: &str = "tray-menu";
+const TRAY_DEFAULT_WIDTH: f64 = 288.0;
+const TRAY_DEFAULT_HEIGHT: f64 = 456.0;
 
 #[cfg(windows)]
 const FOCUS_PIPE_NAME: &str = r"\\.\pipe\bypath-gui-focus-v1";
@@ -79,6 +85,9 @@ struct AppBackend {
     embedded: Arc<DaemonController>,
     minimize_to_tray: AtomicBool,
     allow_exit: AtomicBool,
+    tray_last_blur: Mutex<Option<Instant>>,
+    tray_last_shown: Mutex<Option<Instant>>,
+    tray_last_anchor: Mutex<Option<(f64, f64)>>,
 }
 
 impl AppBackend {
@@ -92,6 +101,9 @@ impl AppBackend {
             embedded,
             minimize_to_tray: AtomicBool::new(initial_minimize),
             allow_exit: AtomicBool::new(false),
+            tray_last_blur: Mutex::new(None),
+            tray_last_shown: Mutex::new(None),
+            tray_last_anchor: Mutex::new(None),
         })
     }
 
@@ -114,12 +126,15 @@ impl AppBackend {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrayStatePayload {
-    status_label: String,
-    show_label: String,
-    toggle_label: String,
-    quit_label: String,
     tooltip: String,
-    minimize_to_tray: bool,
+    #[serde(default)]
+    minimize_to_tray: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UiPrefsSyncPayload {
+    locale: Option<String>,
+    theme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,40 +388,68 @@ async fn set_tray_state(
     state: State<'_, Arc<AppBackend>>,
     payload: TrayStatePayload,
 ) -> Result<(), String> {
-    state
-        .minimize_to_tray
-        .store(payload.minimize_to_tray, Ordering::Relaxed);
+    if let Some(minimize) = payload.minimize_to_tray {
+        state.minimize_to_tray.store(minimize, Ordering::Relaxed);
+    }
 
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let status_item =
-            MenuItem::with_id(&app, "status", &payload.status_label, false, None::<&str>)
-                .map_err(|e| e.to_string())?;
-        let sep1 = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
-        let show_item =
-            MenuItem::with_id(&app, "show", &payload.show_label, true, None::<&str>)
-                .map_err(|e| e.to_string())?;
-        let toggle_item =
-            MenuItem::with_id(&app, "toggle", &payload.toggle_label, true, None::<&str>)
-                .map_err(|e| e.to_string())?;
-        let sep2 = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
-        let quit_item =
-            MenuItem::with_id(&app, "quit", &payload.quit_label, true, None::<&str>)
-                .map_err(|e| e.to_string())?;
-        let menu = Menu::with_items(
-            &app,
-            &[
-                &status_item,
-                &sep1,
-                &show_item,
-                &toggle_item,
-                &sep2,
-                &quit_item,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        let _ = tray.set_menu(Some(menu));
         let _ = tray.set_tooltip(Some(&payload.tooltip));
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_main_window(app: AppHandle, tab: Option<String>) -> Result<(), String> {
+    hide_tray_window(&app);
+    reveal_main_window(&app);
+    if let Some(target_tab) = tab {
+        let _ = app.emit("bypath://navigate", target_tab);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_tray_menu(app: AppHandle) -> Result<(), String> {
+    hide_tray_window(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn resize_tray_menu(
+    app: AppHandle,
+    state: State<'_, Arc<AppBackend>>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let clamped_w = width.clamp(220.0, 400.0).ceil();
+    let clamped_h = height.clamp(160.0, 640.0).ceil();
+    if let Some(win) = app.get_webview_window(TRAY_WINDOW_LABEL) {
+        let _ = win.set_size(LogicalSize::new(clamped_w, clamped_h));
+        if win.is_visible().unwrap_or(false) {
+            let anchor = state.tray_last_anchor.lock().ok().and_then(|g| *g);
+            if let Some((ax, ay)) = anchor {
+                position_tray_window(&app, &win, ax, ay);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_ui_prefs(
+    app: AppHandle,
+    locale: Option<String>,
+    theme: Option<String>,
+) -> Result<(), String> {
+    let _ = app.emit("bypath://ui-prefs", UiPrefsSyncPayload { locale, theme });
+    Ok(())
+}
+
+#[tauri::command]
+async fn quit_app(app: AppHandle, state: State<'_, Arc<AppBackend>>) -> Result<(), String> {
+    state.allow_exit.store(true, Ordering::SeqCst);
+    hide_tray_window(&app);
+    app.exit(0);
     Ok(())
 }
 
@@ -686,57 +729,207 @@ fn reveal_main_window(app: &AppHandle) {
     }
 }
 
-fn setup_tray(app: &AppHandle, backend: Arc<AppBackend>) -> tauri::Result<()> {
-    let status_item = MenuItem::with_id(app, "status", "Bypath - Standby", false, None::<&str>)?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let show_item = MenuItem::with_id(app, "show", "Show Bypath", true, None::<&str>)?;
-    let toggle_item = MenuItem::with_id(app, "toggle", "Toggle Proxying", true, None::<&str>)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[&status_item, &sep1, &show_item, &toggle_item, &sep2, &quit_item],
-    )?;
+fn hide_tray_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(TRAY_WINDOW_LABEL) {
+        let _ = win.hide();
+    }
+}
 
-    let backend_for_menu = Arc::clone(&backend);
+fn build_tray_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    WebviewWindowBuilder::new(
+        app,
+        TRAY_WINDOW_LABEL,
+        WebviewUrl::App("index.html?view=tray".into()),
+    )
+    .title("Bypath Tray")
+    .inner_size(TRAY_DEFAULT_WIDTH, TRAY_DEFAULT_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .build()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_tray_popup_position(
+    anchor_x: f64,
+    anchor_y: f64,
+    win_w: i32,
+    win_h: i32,
+    work_left: i32,
+    work_top: i32,
+    work_w: i32,
+    work_h: i32,
+    margin: i32,
+) -> (i32, i32) {
+    let work_right = work_left + work_w;
+    let work_bottom = work_top + work_h;
+
+    let min_x = work_left + margin;
+    let max_x = (work_right - win_w - margin).max(min_x);
+    let raw_x = (anchor_x - (win_w as f64 / 2.0)).round() as i32;
+    let x = raw_x.clamp(min_x, max_x);
+
+    let min_y = work_top + margin;
+    let max_y = (work_bottom - win_h - margin).max(min_y);
+    let anchor_yi = anchor_y.round() as i32;
+    let midpoint_y = work_top + (work_h / 2);
+
+    let raw_y = if anchor_yi >= midpoint_y {
+        let base_bottom = anchor_yi.min(work_bottom);
+        let above = base_bottom - win_h;
+        if above >= min_y {
+            above
+        } else {
+            anchor_yi
+        }
+    } else {
+        let base_top = anchor_yi.max(work_top);
+        if base_top + win_h <= work_bottom {
+            base_top
+        } else {
+            base_top - win_h
+        }
+    };
+
+    let y = raw_y.clamp(min_y, max_y);
+    (x, y)
+}
+
+fn position_tray_window(app: &AppHandle, win: &WebviewWindow, anchor_x: f64, anchor_y: f64) {
+    let size = win.outer_size().ok().filter(|s| s.width > 0 && s.height > 0);
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let win_w = size
+        .map(|s| s.width as i32)
+        .unwrap_or_else(|| (TRAY_DEFAULT_WIDTH * scale).round() as i32);
+    let win_h = size
+        .map(|s| s.height as i32)
+        .unwrap_or_else(|| (TRAY_DEFAULT_HEIGHT * scale).round() as i32);
+
+    let anchor_xi = anchor_x.round() as i32;
+    let anchor_yi = anchor_y.round() as i32;
+
+    let target_monitor = app
+        .available_monitors()
+        .ok()
+        .and_then(|monitors| {
+            monitors.into_iter().find(|m| {
+                let pos = m.position();
+                let sz = m.size();
+                anchor_xi >= pos.x
+                    && anchor_xi < pos.x + sz.width as i32
+                    && anchor_yi >= pos.y
+                    && anchor_yi < pos.y + sz.height as i32
+            })
+        })
+        .or_else(|| win.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+
+    let (x, y) = if let Some(monitor) = target_monitor {
+        let work = monitor.work_area();
+        let margin = (2.0 * monitor.scale_factor()).round() as i32;
+        compute_tray_popup_position(
+            anchor_x,
+            anchor_y,
+            win_w,
+            win_h,
+            work.position.x,
+            work.position.y,
+            work.size.width as i32,
+            work.size.height as i32,
+            margin,
+        )
+    } else {
+        (
+            (anchor_x - (win_w as f64 / 2.0)).round() as i32,
+            (anchor_y - win_h as f64).round().max(0.0) as i32,
+        )
+    };
+
+    let _ = win.set_position(PhysicalPosition::new(x, y));
+}
+
+fn toggle_tray_popover(app: &AppHandle, backend: &Arc<AppBackend>, anchor_x: f64, anchor_y: f64) {
+    let win = match app.get_webview_window(TRAY_WINDOW_LABEL) {
+        Some(w) => w,
+        None => match build_tray_window(app) {
+            Ok(w) => w,
+            Err(err) => {
+                warn!("failed to create custom tray menu window: {err}");
+                return;
+            }
+        },
+    };
+
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.hide();
+        return;
+    }
+
+    if let Ok(guard) = backend.tray_last_blur.lock() {
+        if let Some(last_blur) = *guard {
+            if last_blur.elapsed() < Duration::from_millis(280) {
+                return;
+            }
+        }
+    }
+
+    if let Ok(mut anchor_guard) = backend.tray_last_anchor.lock() {
+        *anchor_guard = Some((anchor_x, anchor_y));
+    }
+
+    position_tray_window(app, &win, anchor_x, anchor_y);
+    let _ = app.emit("bypath://tray-opened", ());
+
+    if let Ok(mut shown_guard) = backend.tray_last_shown.lock() {
+        *shown_guard = Some(Instant::now());
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
+fn setup_tray(app: &AppHandle, backend: Arc<AppBackend>) -> tauri::Result<()> {
+    // Pre-warm the custom frameless tray popover window so right-clicking opens instantaneously.
+    if let Err(err) = build_tray_window(app) {
+        warn!("failed to pre-warm custom tray popover window: {err}");
+    }
+
+    let backend_for_tray = Arc::clone(&backend);
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("Bypath")
-        .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| match event.id.as_ref() {
-            "show" => reveal_main_window(app),
-            "toggle" => {
-                let b = Arc::clone(&backend_for_menu);
-                let app_handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Ok(IpcResponse::Status { status }) =
-                        b.dispatch(IpcRequest::GetStatus).await
-                    {
-                        let req = if status.engine_running {
-                            IpcRequest::StopEngine
-                        } else {
-                            IpcRequest::StartEngine
-                        };
-                        let _ = b.dispatch(req).await;
-                        let _ = app_handle.emit("bypath://refresh", ());
-                    }
-                });
-            }
-            "quit" => {
-                backend_for_menu.allow_exit.store(true, Ordering::SeqCst);
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        .on_tray_icon_event(move |tray, event| match event {
+            TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                hide_tray_window(tray.app_handle());
                 reveal_main_window(tray.app_handle());
             }
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                position,
+                ..
+            } => {
+                toggle_tray_popover(
+                    tray.app_handle(),
+                    &backend_for_tray,
+                    position.x,
+                    position.y,
+                );
+            }
+            _ => {}
         });
 
     if let Some(icon) = app.default_window_icon() {
@@ -864,8 +1057,15 @@ pub fn run() {
             spawn_focus_listener(handle);
             Ok(())
         })
-        .on_window_event(move |window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(move |window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == TRAY_WINDOW_LABEL {
+                    if !backend_for_close.allow_exit.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    return;
+                }
                 let should_hide = !backend_for_close.allow_exit.load(Ordering::SeqCst)
                     && backend_for_close.minimize_to_tray.load(Ordering::Relaxed);
                 if should_hide {
@@ -873,6 +1073,22 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
+            WindowEvent::Focused(false) if window.label() == TRAY_WINDOW_LABEL => {
+                let within_open_grace = backend_for_close
+                    .tray_last_shown
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .map(|t| t.elapsed() < Duration::from_millis(120))
+                    .unwrap_or(false);
+                if !within_open_grace && window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                    if let Ok(mut guard) = backend_for_close.tray_last_blur.lock() {
+                        *guard = Some(Instant::now());
+                    }
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -893,6 +1109,11 @@ pub fn run() {
             import_config_toml,
             get_agent_info,
             set_tray_state,
+            open_main_window,
+            hide_tray_menu,
+            resize_tray_menu,
+            sync_ui_prefs,
+            quit_app,
             open_path_in_explorer,
             open_windows_security,
             check_for_updates,
@@ -913,4 +1134,45 @@ pub fn run() {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_tray_popup_position;
+
+    #[test]
+    fn positions_above_bottom_taskbar_and_clamps_right_edge() {
+        let (x, y) = compute_tray_popup_position(
+            1880.0, 1056.0, 284, 388, 0, 0, 1920, 1032, 2,
+        );
+        assert_eq!(x, 1920 - 284 - 2);
+        assert_eq!(y, 1032 - 388 - 2);
+    }
+
+    #[test]
+    fn positions_below_top_taskbar() {
+        let (x, y) = compute_tray_popup_position(
+            1700.0, 20.0, 284, 388, 0, 48, 1920, 1032, 2,
+        );
+        assert_eq!(x, 1700 - 142);
+        assert_eq!(y, 50);
+    }
+
+    #[test]
+    fn positions_above_overflow_flyout_icon_within_work_area() {
+        let (x, y) = compute_tray_popup_position(
+            1740.0, 900.0, 284, 388, 0, 0, 1920, 1032, 2,
+        );
+        assert_eq!(x, 1740 - 142);
+        assert_eq!(y, 900 - 388);
+    }
+
+    #[test]
+    fn clamps_left_edge_on_secondary_monitor_with_negative_origin() {
+        let (x, y) = compute_tray_popup_position(
+            -1900.0, 1050.0, 284, 388, -1920, 0, 1920, 1032, 4,
+        );
+        assert_eq!(x, -1916);
+        assert_eq!(y, 1032 - 388 - 4);
+    }
 }

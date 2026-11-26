@@ -207,12 +207,13 @@ export interface AgentInfo {
 }
 
 export interface TrayStatePayload {
-  status_label: string;
-  show_label: string;
-  toggle_label: string;
-  quit_label: string;
   tooltip: string;
-  minimize_to_tray: boolean;
+  minimize_to_tray?: boolean;
+}
+
+export interface UiPrefsSyncPayload {
+  locale?: string | null;
+  theme?: string | null;
 }
 
 export interface PresetInfo {

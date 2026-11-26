@@ -9,6 +9,7 @@ import {
 } from "react";
 import enMessages from "../locales/en.json";
 import zhCnMessages from "../locales/zh-CN.json";
+import { api } from "./api";
 
 export type Locale = "zh-CN" | "en";
 export type MessageKey = keyof typeof enMessages;
@@ -58,6 +59,31 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     document.documentElement.lang = locale;
   }, [locale]);
 
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY && (e.newValue === "en" || e.newValue === "zh-CN")) {
+        setLocaleState(e.newValue);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+
+    let unlisten: (() => void) | null = null;
+    void api
+      .subscribeUiPrefs((prefs) => {
+        if (prefs.locale === "en" || prefs.locale === "zh-CN") {
+          setLocaleState(prefs.locale);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      unlisten?.();
+    };
+  }, []);
+
   const setLocale = useCallback((next: Locale) => {
     setLocaleState(next);
     try {
@@ -65,6 +91,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     } catch {
       // Ignore storage errors.
     }
+    void api.syncUiPrefs({ locale: next });
   }, []);
 
   const toggleLocale = useCallback(() => {

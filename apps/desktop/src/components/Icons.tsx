@@ -384,3 +384,23 @@ export function ChevronDownIcon(props: IconProps) {
     </svg>
   );
 }
+
+export function AppWindowIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <path d="M3.5 9.5h17" />
+      <circle cx="7" cy="7" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="9.6" cy="7" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function PowerIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props.size, props)}>
+      <path d="M12 4.5v7" />
+      <path d="M7.5 7.2a7 7 0 1 0 9 0" />
+    </svg>
+  );
+}

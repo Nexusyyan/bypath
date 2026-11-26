@@ -10,6 +10,7 @@ import type {
   EngineEvent,
   LogEntry,
   NamedProxyProbe,
+  NavTab,
   PresetInfo,
   ProcessEntry,
   ProxyConfig,
@@ -18,6 +19,7 @@ import type {
   ServiceStateSummary,
   SystemProxyInfo,
   TrayStatePayload,
+  UiPrefsSyncPayload,
   UpdateCheckReport,
 } from "./types";
 
@@ -501,6 +503,39 @@ export const api = {
     }
   },
 
+  async openMainWindow(tab?: NavTab): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("open_main_window", { tab: tab ?? null });
+    }
+  },
+
+  async hideTrayMenu(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("hide_tray_menu");
+    }
+  },
+
+  async resizeTrayMenu(width: number, height: number): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("resize_tray_menu", { width, height });
+    }
+  },
+
+  async syncUiPrefs(payload: UiPrefsSyncPayload): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("sync_ui_prefs", {
+        locale: payload.locale ?? null,
+        theme: payload.theme ?? null,
+      });
+    }
+  },
+
+  async quitApp(): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke("quit_app");
+    }
+  },
+
   async openPathInExplorer(path: string): Promise<void> {
     if (isTauriRuntime()) {
       await invoke("open_path_in_explorer", { path });
@@ -588,5 +623,42 @@ export const api = {
       u1();
       u2();
     };
+  },
+
+  async subscribeNavigate(onNavigate: (tab: NavTab) => void): Promise<UnlistenFn> {
+    if (!isTauriRuntime()) {
+      return () => {};
+    }
+    return listen<string>("bypath://navigate", (e) => {
+      const tab = e.payload;
+      if (
+        tab === "connections" ||
+        tab === "applications" ||
+        tab === "proxies" ||
+        tab === "diagnostics"
+      ) {
+        onNavigate(tab);
+      }
+    });
+  },
+
+  async subscribeTrayOpened(onOpened: () => void): Promise<UnlistenFn> {
+    if (!isTauriRuntime()) {
+      return () => {};
+    }
+    return listen("bypath://tray-opened", () => {
+      onOpened();
+    });
+  },
+
+  async subscribeUiPrefs(
+    onPrefs: (payload: UiPrefsSyncPayload) => void
+  ): Promise<UnlistenFn> {
+    if (!isTauriRuntime()) {
+      return () => {};
+    }
+    return listen<UiPrefsSyncPayload>("bypath://ui-prefs", (e) => {
+      onPrefs(e.payload);
+    });
   },
 };

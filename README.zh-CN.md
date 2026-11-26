@@ -21,7 +21,7 @@ Bypath 面向需要“开源版 Proxifier”体验的桌面用户与开发者：
 - **零全局路由冲突**：不创建虚拟网卡、不改动系统路由表，与企业 VPN、WSL2、Docker Desktop、Hyper-V 及局域网设备无缝共存。
 - **完整进程树追踪与动态防环回**：自动沿父子进程链追踪派生子进程，结合 `NtQueryInformationProcess` 微秒级单 PID 解析、WinDivert `SOCKET` 预热以及上游代理重启自动刷新防环回 PID，稳定接管短生命周期子进程。
 - **跨分段后量子 TLS SNI 嗅探与双阶段域名治理**：兼容现代 Chrome/Electron/Go 启用 `X25519MLKEM768` 产生的大包分片 TLS ClientHello，结合 HTTP `Host` 与 QUIC Initial 检测，支持精确域名、通配符（`*.example.com`）与模糊匹配下的拦截（Block）、直连放行（Direct）与指定代理覆写。
-- **桌面常驻体验与全链路可观测**：支持关闭最小化到系统托盘、托盘动态双语菜单、Win32 单实例防多开、浅色 / 纯炭黑深色 / 跟随系统主题、自动经由上游代理或直连检测 GitHub Releases 新版本、全定制圆角控件（无原生尖角弹窗）、切页保留筛选状态、全局快捷键（`Ctrl+K`、`Ctrl+1..4`、`Space`、`Esc`）、60 秒实时吞吐折线、按进程/域名流量汇总、规则编辑与优先级排序、规则干跑命中测试、守护进程实时日志面板、TOML 导入导出、CSV 导出与绿色便携模式（`portable.json`）。
+- **桌面常驻体验与全链路可观测**：支持关闭最小化到系统托盘、自定义无边框 CSS 双语托盘弹窗（实时速率/活跃连接、一键启停、快捷跳转与语言/主题联动切换）、Win32 单实例防多开、浅色 / 纯炭黑深色 / 跟随系统主题、自动经由上游代理或直连检测 GitHub Releases 新版本、全定制圆角控件（无原生尖角弹窗）、切页保留筛选状态、全局快捷键（`Ctrl+K`、`Ctrl+1..4`、`Space`、`Esc`）、60 秒实时吞吐折线、按进程/域名流量汇总、规则编辑与优先级排序、规则干跑命中测试、守护进程实时日志面板、TOML 导入导出、CSV 导出与绿色便携模式（`portable.json`）。
 - **AI Agent 与 CLI 自动化（高自由度 DIY）**：内置原生 Stdio MCP Server（`bypath mcp`）与结构化 JSON 命令行接口（`bypath ctl --json`），可在 Antigravity、Claude Code、Cursor 中直接让 AI 帮您读取系统代理、编排规则、干跑测试、检查版本更新与排查连接日志。
 
 ## 快速开始（Windows 10/11 x64）

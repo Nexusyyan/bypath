@@ -5,6 +5,7 @@ import { api } from "./lib/api";
 import { domainPatternMatches } from "./lib/connections";
 import { useI18n, type MessageKey } from "./lib/i18n";
 import { useTheme, type ThemeMode } from "./lib/theme";
+import { buildTrayTooltip, extractFirstProxyAddress } from "./lib/tray";
 import type {
   Config,
   ConnectionRecord,
@@ -197,29 +198,36 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [config, handleCheckUpdates]);
 
-  // Sync dynamic localized tray menu and close-to-tray behavior whenever state changes.
-  const firstProxyAddress = config
-    ? Object.values(config.proxies)[0]?.address ?? null
-    : null;
+  // Sync localized tray tooltip and close-to-tray behavior whenever state changes.
+  const firstProxyAddress = extractFirstProxyAddress(config);
 
   useEffect(() => {
     const running = status?.engine_running ?? false;
     const proxyLabel = firstProxyAddress ?? "-";
-    const statusLabel = running
-      ? t("tray.statusRunning", { proxy: proxyLabel })
-      : t("tray.statusStandby");
-    const tooltip = running
-      ? `Bypath - ${statusLabel}`
-      : `Bypath - ${t("tray.statusStandby")}`;
+    const tooltip = buildTrayTooltip(
+      running,
+      t("tray.statusRunning", { proxy: proxyLabel }),
+      t("tray.statusStandby")
+    );
     void api.setTrayState({
-      status_label: statusLabel,
-      show_label: t("tray.show"),
-      toggle_label: running ? t("tray.stop") : t("tray.start"),
-      quit_label: t("tray.quit"),
       tooltip,
       minimize_to_tray: config?.general.minimize_to_tray ?? true,
     });
   }, [locale, status?.engine_running, firstProxyAddress, config?.general.minimize_to_tray, t]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void api
+      .subscribeNavigate((tab) => {
+        setActiveTab(tab);
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   // Global keyboard shortcuts (Ctrl+1..4 tabs, Ctrl+K or / search, Space pause, Esc collapse)
   useEffect(() => {

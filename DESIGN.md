@@ -72,6 +72,7 @@ Pure charcoal neutrals with zero blue cast and crisp hairline separation:
 - **Process Tabs + Detail/Summary Switch + Integrated Pagination**: Persistent state across tab switches, clickable sortable headers, per-process/domain traffic aggregation view, expanded-row quick actions (Copy, Direct Bypass, Block/Unblock), and bottom `#F9F9FA` / `#111113` pagination bar.
 - **Priority Rules + Dry-Run Tester**: Numbered `#1..#N` rules with up/down reordering, inline create/edit form with collapsible L4 advanced criteria, and instant Phase 1/Phase 2 dry-run match tester.
 - **Live Daemon Logs & Agent DIY Card**: Filterable monochrome monospace log feed and one-click copyable `bypath mcp` / `bypath ctl --json` integration card inside Diagnostics.
+- **Custom System Tray Popover (`tray-menu`)**: Frameless transparent Tauri popup window (`264px` rounded card inside a `10px` transparent shadow frame, `14px` outer radius with `6px` section padding and concentric `8px` interactive rows) replacing the native Win32 right-click menu. Features live engine status and tabular throughput readout, one-click Start/Stop toggle, direct workspace tab jumps, instant cross-window Light/Dark/System theme and `zh-CN`/`en` locale toggles, and hover-reveal Quit action.
 
 ## Typography & Iconography
 

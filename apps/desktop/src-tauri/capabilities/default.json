@@ -1,13 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for Bypath main window",
-  "windows": ["main"],
+  "description": "Default capability for Bypath main and tray popup windows",
+  "windows": ["main", "tray-menu"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-size",
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized"
   ]

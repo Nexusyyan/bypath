@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { api } from "./api";
 
 export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
@@ -73,6 +74,38 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.theme = resolved;
   }, [resolved]);
 
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (
+        e.key === STORAGE_KEY &&
+        (e.newValue === "light" || e.newValue === "dark" || e.newValue === "system")
+      ) {
+        setModeState(e.newValue);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+
+    let unlisten: (() => void) | null = null;
+    void api
+      .subscribeUiPrefs((prefs) => {
+        if (
+          prefs.theme === "light" ||
+          prefs.theme === "dark" ||
+          prefs.theme === "system"
+        ) {
+          setModeState(prefs.theme);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      unlisten?.();
+    };
+  }, []);
+
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next);
     try {
@@ -80,6 +113,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     } catch {
       // Ignore storage failures.
     }
+    void api.syncUiPrefs({ theme: next });
   }, []);
 
   const cycleMode = useCallback(() => {
